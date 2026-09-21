@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { User, UserRole } from '../types';
 import { HaysLogo } from './HaysLogo';
+import { safeFetchJson } from '../utils/api';
 
 interface SubcontractorAuthPageProps {
   onLoginSuccess: (user: User, token: string) => void;
@@ -58,25 +59,19 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
     }
 
     setIsLoading(true);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: cleanEmail, password: cleanPassword })
-      });
-      const data = await res.json();
+    const { ok, data, error } = await safeFetchJson<{ success: boolean; user: User; token: string; error?: string }>('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: cleanEmail, password: cleanPassword })
+    });
 
-      if (!res.ok || !data.success) {
-        setErrorMessage(data.error || 'Invalid email or password.');
-        setIsLoading(false);
-        return;
-      }
-
-      onLoginSuccess(data.user, data.token);
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Unable to connect to authentication service.');
+    if (!ok || !data?.success) {
+      setErrorMessage(error || data?.error || 'Invalid email or password.');
       setIsLoading(false);
+      return;
     }
+
+    onLoginSuccess(data.user, data.token);
   };
 
   // Instant 1-Click Quick Demo Login
@@ -85,25 +80,19 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
     setSuccessNotice(null);
     setQuickLoadingRole(role);
 
-    try {
-      const res = await fetch('/api/auth/quick-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role })
-      });
-      const data = await res.json();
+    const { ok, data, error } = await safeFetchJson<{ success: boolean; user: User; token: string; error?: string }>('/api/auth/quick-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role })
+    });
 
-      if (!res.ok || !data.success) {
-        setErrorMessage(data.error || 'Quick login failed. Please try standard sign in.');
-        setQuickLoadingRole(null);
-        return;
-      }
-
-      onLoginSuccess(data.user, data.token);
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Quick login failed.');
+    if (!ok || !data?.success) {
+      setErrorMessage(error || data?.error || 'Quick login failed. Please try standard sign in.');
       setQuickLoadingRole(null);
+      return;
     }
+
+    onLoginSuccess(data.user, data.token);
   };
 
   // Simplified Account Registration
@@ -126,35 +115,29 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
     }
 
     setIsLoading(true);
-    try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name.trim(),
-          email: email.trim(),
-          role: registerRole,
-          company: company.trim() || (registerRole === 'pm' ? 'Hays + Sons Restoration' : 'Trade Partner'),
-          phone: phone.trim(),
-          password: password.trim()
-        })
-      });
-      const data = await res.json();
+    const { ok, data, error } = await safeFetchJson<{ success: boolean; user: User; token: string; error?: string }>('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name.trim(),
+        email: email.trim(),
+        role: registerRole,
+        company: company.trim() || (registerRole === 'pm' ? 'Hays + Sons Restoration' : 'Trade Partner'),
+        phone: phone.trim(),
+        password: password.trim()
+      })
+    });
 
-      if (!res.ok || !data.success) {
-        setErrorMessage(data.error || 'Registration failed.');
-        setIsLoading(false);
-        return;
-      }
-
-      setSuccessNotice('Account created successfully! Signing in...');
-      setTimeout(() => {
-        onLoginSuccess(data.user, data.token);
-      }, 500);
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Error registering account.');
+    if (!ok || !data?.success) {
+      setErrorMessage(error || data?.error || 'Registration failed.');
       setIsLoading(false);
+      return;
     }
+
+    setSuccessNotice('Account created successfully! Signing in...');
+    setTimeout(() => {
+      onLoginSuccess(data.user, data.token);
+    }, 500);
   };
 
   return (

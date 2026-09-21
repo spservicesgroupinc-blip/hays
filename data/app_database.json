@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "savedAt": "2026-09-21T11:47:39.675Z",
+  "savedAt": "2026-09-21T12:19:50.625Z",
   "customAppsScriptUrl": "https://script.google.com/macros/s/AKfycbyEtLFk6mTeOHbYQZrR4ct-g00gmA8yRJSuM4mnTGq-dt7asGtn4yNtEpI4yoU-9NlryA/exec",
   "users": {
     "usr_pm_default": {
@@ -59,8 +59,8 @@
         "delete_work_order",
         "view_analytics"
       ],
-      "salt": "c220a3b2c209237d92c9e585f09d94be",
-      "passwordHash": "627278d180aab73b15d55e79cd7efe2261f2ba276dad10eadbe343ba172a02bd40ddd4eae42e1750a202443339abe2f27f24ae679993895eb094ff0e00312089",
+      "salt": "salt_pm_1789993187169",
+      "passwordHash": "b06663c745fcd04336d92caf8e4ac6bd8732616e597e36cadbab333ffe3677f39fbd8f8d31eda840f0b93237b4e5ecba2d631b3ce1dd5dd0517797219d7b7eb9",
       "tempPassword": "Password123!",
       "password": "Password123!",
       "createdAt": "2026-09-21T11:47:37.939Z"
@@ -79,17 +79,109 @@
         "upload_inspection_photo",
         "sign_off_work_order"
       ],
-      "salt": "c50d5ea1e1866f7448f8ce62a788f0e5",
-      "passwordHash": "1cead4a59dc91fe4fc4dbe1ee8c89051c0828f92bd2ce26a56ee5bc0b58d09081ca54a7b5cc796568eda87d5902a10929b0774fc2a99028964645bc9fa74b5e1",
+      "salt": "salt_sub_1789993187168",
+      "passwordHash": "3c428a587c3003d6785d4eb070e33744462922075eb24a39922fe3f7b34b4f285fdddae056286ba6c566a0917e43f25cc715e9245a68c6eba6b1889df04b350a",
       "tempPassword": "SubPassword456!",
       "password": "SubPassword456!",
       "createdAt": "2026-09-21T11:47:39.675Z"
+    },
+    "SUB-7665": {
+      "id": "SUB-7665",
+      "email": "sub@sub.com",
+      "name": "sub",
+      "role": "subcontractor",
+      "company": "sub",
+      "trade": "Drywall, Finishing & Painting",
+      "phone": "",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "salt_1789992942500",
+      "passwordHash": "166b2affdd1c7c97db22847d896b8b4733791a26a92826610ff42d85e825b2170beaee91787a4c94bf4ce9f1a60aa56cad40c826d57e6795f462c2cd64a936df",
+      "tempPassword": "rjames98",
+      "password": "rjames98",
+      "createdAt": "2026-09-21T12:15:42.501Z"
+    },
+    "SUB-2072": {
+      "id": "SUB-2072",
+      "email": "s2@s2.com",
+      "name": "s2",
+      "role": "subcontractor",
+      "company": "s2",
+      "trade": "Drywall, Finishing & Painting",
+      "phone": "",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "salt_sub_1789993187167",
+      "passwordHash": "7694d73664f4653c1ddb46f83224d3f1ec747e7b55c0c596ebc458ddba2417bdc3cc7b5fc2fbb81a36ef2383152db67efbefec3a8d4f08eb4d261cfc11317a09",
+      "tempPassword": "Password123!",
+      "password": "Password123!",
+      "createdAt": "2026-09-21T11:47:41.065Z"
+    },
+    "PM-9428": {
+      "id": "PM-9428",
+      "email": "rrussell@haysandsons.com",
+      "name": "Test",
+      "role": "pm",
+      "company": "Hays + Sons Restoration",
+      "trade": "General Restoration & Project Management",
+      "phone": "",
+      "assignedWoIds": [],
+      "permissions": [
+        "create_work_order",
+        "view_all_work_orders",
+        "edit_work_order",
+        "delete_work_order",
+        "view_analytics"
+      ],
+      "salt": "salt_pm_1789991261065",
+      "passwordHash": "a325b1154dad21d2fb3235e8c064dbd2c8610ae14cbee2ceb99a8b8b9de76d237fc90f1a42941821d31bbf808c7955c3e52e61d6838065d2b6115a5ebdae30c6",
+      "tempPassword": "Password123!",
+      "password": "Password123!",
+      "createdAt": "2026-09-21T11:47:41.066Z"
+    },
+    "usr_subcontractor_1789993190625": {
+      "id": "usr_subcontractor_1789993190625",
+      "email": "sarah@trade.com",
+      "name": "Sarah Connor",
+      "role": "subcontractor",
+      "company": "Connor Tile",
+      "trade": "Trade Subcontractor",
+      "phone": "260-555-9999",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "db67e6954e45fb2370703e594a40036a",
+      "passwordHash": "15f6be31c30af292c5d634d0f7371094707ba8ddacb13bbe4df789c01d940eee4ef28e6380fb90853a2ed26b68f5ae8ebaa35ea9aed51d237fa31a0710e8acf6",
+      "tempPassword": "Password123!",
+      "password": "Password123!",
+      "createdAt": "2026-09-21T12:19:50.625Z"
     }
   },
   "workOrders": {},
   "lineItems": {},
   "jobs": {},
   "activityLogs": [
+    {
+      "id": "act_1789991259675",
+      "timestamp": "11:47 AM",
+      "type": "sub_created",
+      "subId": "usr_subcontractor_1789991259675",
+      "subName": "Alex Subcontractor",
+      "company": "Alex Drywall & Paint",
+      "taskDescription": "Subcontractor account created (Trade Subcontractor)",
+      "notes": "Registered via portal"
+    },
     {
       "id": "act_1789991257953",
       "timestamp": "11:47 AM",

@@ -38,6 +38,24 @@ app.use((req, res, next) => {
   next();
 });
 
+// URL normalization for serverless environments (handles stripped /api prefixes)
+app.use((req, res, next) => {
+  if (!req.url.startsWith('/api') && (
+    req.url.startsWith('/auth') || 
+    req.url.startsWith('/work-orders') || 
+    req.url.startsWith('/jobs') || 
+    req.url.startsWith('/subcontractors') || 
+    req.url.startsWith('/health') || 
+    req.url.startsWith('/cloud-sync') || 
+    req.url.startsWith('/ai') || 
+    req.url.startsWith('/verify-photo') || 
+    req.url.startsWith('/pm')
+  )) {
+    req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
+  }
+  next();
+});
+
 // ----------------------------------------------------------------------------
 // DATA MODELS & TYPES
 // ----------------------------------------------------------------------------
@@ -232,7 +250,8 @@ const lineItemsDb: Record<string, LineItem[]> = {};
 // ----------------------------------------------------------------------------
 // PERSISTENT DISK STORAGE & CACHING
 // ----------------------------------------------------------------------------
-const DATA_DIR = path.join(process.cwd(), 'data');
+const isVercelRuntime = Boolean(process.env.VERCEL);
+const DATA_DIR = isVercelRuntime ? path.join('/tmp', 'data') : path.join(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'app_database.json');
 
 let customAppsScriptUrl: string = process.env.APPS_SCRIPT_URL || '';
@@ -264,8 +283,13 @@ function saveDatabaseState() {
 
 function loadDatabaseState() {
   try {
-    if (fs.existsSync(DATA_FILE)) {
-      const raw = fs.readFileSync(DATA_FILE, 'utf-8');
+    let sourceFile = DATA_FILE;
+    const defaultStaticDb = path.join(process.cwd(), 'data', 'app_database.json');
+    if (!fs.existsSync(sourceFile) && fs.existsSync(defaultStaticDb)) {
+      sourceFile = defaultStaticDb;
+    }
+    if (fs.existsSync(sourceFile)) {
+      const raw = fs.readFileSync(sourceFile, 'utf-8');
       const data = JSON.parse(raw);
       if (data.users && typeof data.users === 'object') {
         Object.assign(usersDb, data.users);
@@ -2218,6 +2242,26 @@ app.post('/api/cloud-sync/config', async (req, res) => {
     message: isReachable ? 'Google Apps Script URL saved and verified!' : 'URL saved. ' + details,
     online: isReachable,
     details
+  });
+});
+
+// Catch-all 404 handler for API routes to guarantee JSON response format (never HTML)
+app.all('/api/*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `API route not found: ${req.method} ${req.originalUrl || req.url}`
+  });
+});
+
+// Global error handler guaranteeing valid JSON output
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('FieldProof server error:', err);
+  if (res.headersSent) {
+    return next(err);
+  }
+  res.status(err.status || 500).json({
+    success: false,
+    error: err.message || 'An unexpected server error occurred.'
   });
 });
 

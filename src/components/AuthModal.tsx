@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { User as UserType, UserRole } from '../types';
 import { HaysLogo } from './HaysLogo';
+import { safeFetchJson } from '../utils/api';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -46,24 +47,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleQuickSwitch = async (role: 'pm' | 'subcontractor') => {
     setIsLoading(true);
     setError(null);
-    try {
-      const res = await fetch('/api/auth/quick-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role })
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        setError(data.error || 'Failed to switch profile.');
-        setIsLoading(false);
-        return;
-      }
-      onLoginSuccess(data.user, data.token);
-      onClose();
-    } catch (err: any) {
-      setError(err.message || 'Error switching profile.');
+    const { ok, data, error: fetchErr } = await safeFetchJson<{ success: boolean; user: UserType; token: string; error?: string }>('/api/auth/quick-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role })
+    });
+    if (!ok || !data?.success) {
+      setError(fetchErr || data?.error || 'Failed to switch profile.');
       setIsLoading(false);
+      return;
     }
+    onLoginSuccess(data.user, data.token);
+    onClose();
   };
 
   const handleDirectLogin = async (e: React.FormEvent) => {
@@ -75,24 +70,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
     setIsLoading(true);
     setError(null);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email.trim(), password: password.trim() })
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        setError(data.error || 'Invalid credentials.');
-        setIsLoading(false);
-        return;
-      }
-      onLoginSuccess(data.user, data.token);
-      onClose();
-    } catch (err: any) {
-      setError(err.message || 'Login failed.');
+    const { ok, data, error: fetchErr } = await safeFetchJson<{ success: boolean; user: UserType; token: string; error?: string }>('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim(), password: password.trim() })
+    });
+    if (!ok || !data?.success) {
+      setError(fetchErr || data?.error || 'Invalid credentials.');
       setIsLoading(false);
+      return;
     }
+    onLoginSuccess(data.user, data.token);
+    onClose();
   };
 
   return (

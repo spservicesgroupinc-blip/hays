@@ -28,6 +28,7 @@ import {
   FolderKanban
 } from 'lucide-react';
 import { WorkOrder, User, ActivityEvent, SubcontractorSummary, Job } from '../types';
+import { safeFetchJson } from '../utils/api';
 
 interface PMDashboardProps {
   currentUser: User | null;
@@ -342,40 +343,34 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
     if (!newSubForm.name || !newSubForm.company || !newSubForm.email) return;
 
     setIsSubmittingSub(true);
-    try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          role: 'subcontractor',
-          name: newSubForm.name,
-          company: newSubForm.company,
-          trade: newSubForm.trade,
-          email: newSubForm.email,
-          phone: newSubForm.phone,
-          password: newSubForm.password
-        })
-      });
+    const { ok, data, error } = await safeFetchJson<{ success: boolean; user?: User; error?: string }>('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        role: 'subcontractor',
+        name: newSubForm.name,
+        company: newSubForm.company,
+        trade: newSubForm.trade,
+        email: newSubForm.email,
+        phone: newSubForm.phone,
+        password: newSubForm.password
+      })
+    });
 
-      const data = await res.json();
-      if (data.success) {
-        setShowAddSubModal(false);
-        setNewSubForm({
-          name: '',
-          company: '',
-          trade: 'Drywall, Finishing & Painting',
-          email: '',
-          phone: '',
-          password: 'Password123!'
-        });
-        await fetchSubcontractors();
-      } else {
-        alert(data.error || 'Failed to register subcontractor');
-      }
-    } catch (err: any) {
-      alert('Error: ' + err.message);
-    } finally {
-      setIsSubmittingSub(false);
+    setIsSubmittingSub(false);
+    if (ok && data?.success) {
+      setShowAddSubModal(false);
+      setNewSubForm({
+        name: '',
+        company: '',
+        trade: 'Drywall, Finishing & Painting',
+        email: '',
+        phone: '',
+        password: 'Password123!'
+      });
+      await fetchSubcontractors();
+    } else {
+      alert(error || data?.error || 'Failed to register subcontractor');
     }
   };
 
