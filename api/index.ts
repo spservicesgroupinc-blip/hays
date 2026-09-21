@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import app from '../server.ts';
+import app from '../server';
 
 export function normalizeVercelUrl(req: VercelRequest): void {
   // 1. Check for query path from vercel.json rewrite (e.g. ?path=auth/login) or catch-all
@@ -7,7 +7,15 @@ export function normalizeVercelUrl(req: VercelRequest): void {
   if (queryPath) {
     const subpath = Array.isArray(queryPath) ? queryPath.join('/') : queryPath;
     const cleanSubpath = subpath.startsWith('/') ? subpath.slice(1) : subpath;
-    req.url = `/api/${cleanSubpath}`;
+    
+    const originalQueryString = req.url?.includes('?') ? req.url.split('?')[1] : '';
+    const searchParams = new URLSearchParams(originalQueryString);
+    searchParams.delete('path');
+    searchParams.delete('all');
+    searchParams.delete('route');
+    const remainingQuery = searchParams.toString();
+
+    req.url = `/api/${cleanSubpath}${remainingQuery ? `?${remainingQuery}` : ''}`;
     return;
   }
 

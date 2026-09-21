@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "savedAt": "2026-09-21T17:03:37.805Z",
+  "savedAt": "2026-09-21T17:23:15.137Z",
   "customAppsScriptUrl": "https://script.google.com/macros/s/AKfycbyEtLFk6mTeOHbYQZrR4ct-g00gmA8yRJSuM4mnTGq-dt7asGtn4yNtEpI4yoU-9NlryA/exec",
   "users": {
     "usr_pm_default": {
@@ -181,8 +181,8 @@
         "upload_inspection_photo",
         "sign_off_work_order"
       ],
-      "salt": "salt_sub_1790010212251",
-      "passwordHash": "8873e19a6aae9107f9c2a923b8177cb7784e0ba9590e8bc154832a442cdcb08ccabcf2ec5298bf8b8ae1ee2a35b85b74be794a48fb45954cbe34194d8bfde326",
+      "salt": "salt_sub_1790010236567",
+      "passwordHash": "3f905a5f0c04f0018a0bbaf1152a2c1d14d9f4302bc0d7f4f756db26b1fd7d944aa11282d2d9b89b6538ab37f2584a2851debe7e874ca9fce2fb918d6eaf2e0e",
       "tempPassword": "password123",
       "password": "password123",
       "createdAt": "2026-09-21T16:57:46.260Z"
@@ -201,8 +201,8 @@
         "upload_inspection_photo",
         "sign_off_work_order"
       ],
-      "salt": "salt_sub_1790010212252",
-      "passwordHash": "b783c449bc03c04d7a340427f4e4d58882cb3d861b82ddbd1b2611cb4c8e1cc475dbb086fa9a14b3bf453f40dff070d8d25e10ca2514e165ae0a8a6aa8e69c10",
+      "salt": "salt_sub_1790010236568",
+      "passwordHash": "5bacdd7cfebf3821967ae81748c23a59249b2da8744f42652b58c019f4ca5d4a539d475149cacdaad4ebce3923ca55434c6ed5723d60bc7517312052b5565bb0",
       "tempPassword": "password123",
       "password": "password123",
       "createdAt": "2026-09-21T16:59:34.455Z"
@@ -221,11 +221,51 @@
         "upload_inspection_photo",
         "sign_off_work_order"
       ],
-      "salt": "f58f7f398e511e226685b77067878d6b",
-      "passwordHash": "cae03890f10f836370c75cc0a1e48345a4c942d647518c5c8cf25b5396bbccc597c1d276cae431f2d026bf399f96a6ce4c8220cc831116d45705f294a958b2a4",
+      "salt": "salt_sub_1790010236569",
+      "passwordHash": "fea85ebe895789533a975349c5c81f852cb1325e9b0529cd8bd0eed288cb166cb597a245e4e4b732a5aa3b13d600fde7ccf1167171b320bc22308890e3e64582",
       "tempPassword": "Password123!",
       "password": "Password123!",
       "createdAt": "2026-09-21T17:03:37.805Z"
+    },
+    "usr_subcontractor_1790011384494": {
+      "id": "usr_subcontractor_1790011384494",
+      "email": "test_sub_vercel@example.com",
+      "name": "Test Vercel Sub",
+      "role": "subcontractor",
+      "company": "Vercel Roofing Co",
+      "trade": "Roofing",
+      "phone": "(555) 123-4567",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "2190423e2c8c835203dc0f04f098135b",
+      "passwordHash": "babf74b48b6387ab42fa8e06d14e777b3f9d8bc114df9fb313a41481747a1173c77c584e0b06b09108c882c38e8fafb7e72c8c0aef0dfd2bd7e106694b6d31b9",
+      "tempPassword": "Password123!",
+      "password": "Password123!",
+      "createdAt": "2026-09-21T17:23:04.494Z"
+    },
+    "usr_subcontractor_1790011395136": {
+      "id": "usr_subcontractor_1790011395136",
+      "email": "vercel_user_test@example.com",
+      "name": "Vercel Test Contractor",
+      "role": "subcontractor",
+      "company": "Vercel Trades Inc",
+      "trade": "Plumbing",
+      "phone": "(555) 987-6543",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "90a58902e2e1782e0b646c94353c627c",
+      "passwordHash": "a2373df1928e4c172ffda2a006cd546bd17d81cf42ce881d4d29a0179f0b09fa955911c6ffae25c5e6709a8eb3e998e60e83d8373a0f34527b1ab1b84be9f970",
+      "tempPassword": "Password123!",
+      "password": "Password123!",
+      "createdAt": "2026-09-21T17:23:15.136Z"
     }
   },
   "workOrders": {},

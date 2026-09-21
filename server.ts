@@ -171,16 +171,62 @@ function verifyPassword(password: string, salt: string, hash: string): boolean {
   return hashPassword(password, salt) === hash;
 }
 
-function generateSecureToken(): string {
-  return crypto.randomBytes(32).toString('hex');
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const AUTH_SECRET = process.env.AUTH_SECRET || 'fieldproof_secret_auth_key_v2_2026';
+
+interface TokenPayload {
+  uid: string;
+  email: string;
+  role: 'pm' | 'subcontractor';
+  name?: string;
+  company?: string;
+  exp: number;
+}
+
+function generateSecureToken(user?: { id: string; email: string; role: 'pm' | 'subcontractor'; name?: string; company?: string }): string {
+  if (!user) {
+    return crypto.randomBytes(32).toString('hex');
+  }
+  const payload: TokenPayload = {
+    uid: user.id,
+    email: user.email,
+    role: user.role,
+    name: user.name,
+    company: user.company,
+    exp: Date.now() + SEVEN_DAYS_MS
+  };
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', AUTH_SECRET).update(data).digest('base64url');
+  const token = `${data}.${sig}`;
+  sessionsDb[token] = {
+    token,
+    userId: user.id,
+    expiresAt: payload.exp
+  };
+  return token;
+}
+
+function verifyAndDecodeToken(token: string): TokenPayload | null {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [data, sig] = parts;
+  try {
+    const expectedSig = crypto.createHmac('sha256', AUTH_SECRET).update(data).digest('base64url');
+    if (sig !== expectedSig) return null;
+    const payload: TokenPayload = JSON.parse(Buffer.from(data, 'base64url').toString('utf-8'));
+    if (!payload || !payload.uid || !payload.exp) return null;
+    if (Date.now() > payload.exp) return null;
+    return payload;
+  } catch {
+    return null;
+  }
 }
 
 // ----------------------------------------------------------------------------
 // USER & SESSION DATABASE (ZERO MOCK DATA - STARTS CLEAN FROM SCRATCH)
 // ----------------------------------------------------------------------------
 const usersDb: Record<string, UserRecord> = {};
-
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const sessionsDb: Record<string, SessionRecord> = {};
 
 // ----------------------------------------------------------------------------
@@ -214,18 +260,53 @@ function getUserFromRequest(req: express.Request): UserRecord | null {
     token = req.query.token;
   }
 
-  // 1. Check direct active session
-  if (token && sessionsDb[token] && sessionsDb[token].expiresAt >= Date.now()) {
-    const sessionUser = usersDb[sessionsDb[token].userId];
-    if (sessionUser) return sessionUser;
+  // 1. If we have a signed stateless token, verify it (works across all serverless lambda instances)
+  if (token) {
+    const payload = verifyAndDecodeToken(token);
+    if (payload) {
+      let user = usersDb[payload.uid] || Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === payload.email.toLowerCase().trim());
+      if (user) return user;
+
+      // Try reading local storage in case this instance hasn't loaded state
+      loadDatabaseState();
+      user = usersDb[payload.uid] || Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === payload.email.toLowerCase().trim());
+      if (user) return user;
+
+      // Reconstruct valid authorized user from verified stateless token
+      const permissions = payload.role === 'pm'
+        ? ['create_work_order', 'view_all_work_orders', 'edit_work_order', 'delete_work_order', 'view_analytics']
+        : ['view_assigned_work_orders', 'upload_inspection_photo', 'sign_off_work_order'];
+
+      const reconstructedUser: UserRecord = {
+        id: payload.uid,
+        email: payload.email,
+        name: payload.name || (payload.role === 'pm' ? 'Project Manager' : 'Subcontractor Partner'),
+        role: payload.role,
+        company: payload.company || (payload.role === 'pm' ? 'Hays + Sons Restoration' : 'Trade Partner'),
+        trade: payload.role === 'pm' ? 'General Restoration & Project Management' : 'Trade Subcontractor',
+        assignedWoIds: [],
+        permissions,
+        salt: 'stateless',
+        passwordHash: 'stateless',
+        createdAt: new Date().toISOString()
+      };
+      usersDb[payload.uid] = reconstructedUser;
+      return reconstructedUser;
+    }
+
+    // Direct active session cache check
+    if (sessionsDb[token] && sessionsDb[token].expiresAt >= Date.now()) {
+      const sessionUser = usersDb[sessionsDb[token].userId];
+      if (sessionUser) return sessionUser;
+    }
+
+    // Direct user ID token check
+    if (usersDb[token]) {
+      return usersDb[token];
+    }
   }
 
-  // 2. Direct user ID token check
-  if (token && usersDb[token]) {
-    return usersDb[token];
-  }
-
-  // 3. Fallback header check for authenticated clients
+  // 2. Fallback header check for authenticated clients
   const headerUserId = req.headers['x-user-id'];
   if (headerUserId && typeof headerUserId === 'string' && usersDb[headerUserId]) {
     return usersDb[headerUserId];
@@ -265,8 +346,23 @@ const lineItemsDb: Record<string, LineItem[]> = {};
 // ----------------------------------------------------------------------------
 // PERSISTENT DISK STORAGE & CACHING
 // ----------------------------------------------------------------------------
-const isVercelRuntime = Boolean(process.env.VERCEL);
-const DATA_DIR = isVercelRuntime ? path.join('/tmp', 'data') : path.join(process.cwd(), 'data');
+function getWritableDataDir(): string {
+  if (process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT) {
+    return path.join('/tmp', 'data');
+  }
+  const localDir = path.join(process.cwd(), 'data');
+  try {
+    if (!fs.existsSync(localDir)) {
+      fs.mkdirSync(localDir, { recursive: true });
+    }
+    fs.accessSync(localDir, fs.constants.W_OK);
+    return localDir;
+  } catch {
+    return path.join('/tmp', 'data');
+  }
+}
+
+const DATA_DIR = getWritableDataDir();
 const DATA_FILE = path.join(DATA_DIR, 'app_database.json');
 
 let customAppsScriptUrl: string = process.env.APPS_SCRIPT_URL || '';
@@ -335,16 +431,20 @@ function loadDatabaseState() {
 // ----------------------------------------------------------------------------
 // GOOGLE APPS SCRIPT CLOUD SYNC (STORED AS A SECURE SERVER-SIDE SECRET)
 // ----------------------------------------------------------------------------
-async function callAppsScript(action: string, payload: Record<string, any>): Promise<any> {
+async function callAppsScript(action: string, payload: Record<string, any>, timeoutMs = 5000): Promise<any> {
   const url = getEffectiveAppsScriptUrl();
   if (!url) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ action, ...payload }),
-      redirect: 'follow'
+      redirect: 'follow',
+      signal: controller.signal
     });
+    clearTimeout(timer);
     if (!res.ok) {
       console.warn(`Apps Script '${action}' returned HTTP ${res.status}`);
       return null;
@@ -352,6 +452,7 @@ async function callAppsScript(action: string, payload: Record<string, any>): Pro
     const data = await res.json();
     return data;
   } catch (err: any) {
+    clearTimeout(timer);
     console.warn(`Apps Script sync error for action '${action}':`, err.message);
     return null;
   }
@@ -632,7 +733,7 @@ app.post('/api/auth/quick-login', (req, res) => {
     return res.status(404).json({ success: false, error: 'User account not available.' });
   }
 
-  const token = generateSecureToken();
+  const token = generateSecureToken(user);
   sessionsDb[token] = {
     token,
     userId: user.id,
@@ -699,7 +800,7 @@ app.post('/api/auth/register-pm', async (req, res) => {
     usersDb[pmId] = newPm;
     saveDatabaseState();
 
-    const token = generateSecureToken();
+    const token = generateSecureToken(newPm);
     sessionsDb[token] = {
       token,
       userId: pmId,
@@ -820,7 +921,7 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    const token = generateSecureToken();
+    const token = generateSecureToken(user);
     sessionsDb[token] = {
       token,
       userId: user.id,
@@ -928,15 +1029,19 @@ app.post('/api/auth/register', async (req, res) => {
         notes: `Registered via portal`
       });
 
-      // Synchronize new subcontractor directly to Google Sheet with password in background
-      callAppsScript('registerSubcontractor', {
-        company: newUser.company,
-        name: newUser.name,
-        trade: newUser.trade,
-        email: newUser.email,
-        phone: newUser.phone,
-        password: strPass
-      }).catch(e => console.warn('Cloud sheet registration sync notice:', e?.message));
+      // Synchronize new subcontractor directly to Google Sheet
+      try {
+        await callAppsScript('registerSubcontractor', {
+          company: newUser.company,
+          name: newUser.name,
+          trade: newUser.trade,
+          email: newUser.email,
+          phone: newUser.phone,
+          password: strPass
+        }, 3000);
+      } catch (e: any) {
+        console.warn('Cloud sheet registration sync notice:', e?.message);
+      }
     } else if (targetRole === 'pm') {
       activityLogsDb.unshift({
         id: `act_${Date.now()}`,
@@ -949,17 +1054,21 @@ app.post('/api/auth/register', async (req, res) => {
         notes: `Registered via portal`
       });
 
-      // Synchronize new PM directly to Google Sheet with password in background
-      callAppsScript('registerPM', {
-        name: newUser.name,
-        email: newUser.email,
-        company: newUser.company,
-        phone: newUser.phone,
-        password: strPass
-      }).catch(e => console.warn('Cloud sheet PM registration sync notice:', e?.message));
+      // Synchronize new PM directly to Google Sheet
+      try {
+        await callAppsScript('registerPM', {
+          name: newUser.name,
+          email: newUser.email,
+          company: newUser.company,
+          phone: newUser.phone,
+          password: strPass
+        }, 3000);
+      } catch (e: any) {
+        console.warn('Cloud sheet PM registration sync notice:', e?.message);
+      }
     }
 
-    const token = generateSecureToken();
+    const token = generateSecureToken(newUser);
     sessionsDb[token] = {
       token,
       userId: id,
@@ -1268,7 +1377,7 @@ app.post('/api/pm/subcontractors', (req, res) => {
     saveDatabaseState();
 
     // Create session token for quick login
-    const token = generateSecureToken();
+    const token = generateSecureToken(newSub);
     sessionsDb[token] = {
       token,
       userId: subId,
@@ -2346,12 +2455,14 @@ const isDirectExecution = Boolean(
     process.argv[1].endsWith('server.ts') || 
     process.argv[1].endsWith('server.cjs') ||
     process.argv[1].endsWith('server.js')
-  )
+  ) &&
+  !process.argv[1].includes('___vc') &&
+  !process.argv[1].includes('.vercel')
 );
 
 // In local and container environments, boot the server immediately when run directly.
 // When imported by serverless handlers (Vercel / Cloud Functions), the Express instance is exported.
-if (isDirectExecution && !process.env.VERCEL && process.env.NODE_ENV !== 'test') {
+if (isDirectExecution && !process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.AWS_LAMBDA_FUNCTION_NAME && process.env.NODE_ENV !== 'test') {
   startServer();
 }
 
