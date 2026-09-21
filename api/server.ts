@@ -512,7 +512,31 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
   try {
     const data = await callAppsScript('fetchDatabaseState', {});
     if (data && data.success) {
-      // 1. Sync Work Orders
+      // 1. Sync durable jobs before attaching their work orders.
+      if (Array.isArray(data.jobs)) {
+        for (const job of data.jobs) {
+          const id = String(job.id || '').trim();
+          if (!id) continue;
+          jobsDb[id] = {
+            id,
+            customerName: String(job.customerName || 'Customer'),
+            propertyAddress: String(job.propertyAddress || ''),
+            phone: String(job.phone || ''),
+            email: String(job.email || ''),
+            claimNumber: String(job.claimNumber || ''),
+            lossType: String(job.lossType || 'Restoration'),
+            totalEstimate: String(job.totalEstimate || ''),
+            notes: String(job.notes || ''),
+            scopeSummary: String(job.scopeSummary || ''),
+            extractedTasks: Array.isArray(job.extractedTasks) ? job.extractedTasks : [],
+            extractedTrades: Array.isArray(job.extractedTrades) ? job.extractedTrades : [],
+            createdAt: String(job.createdAt || new Date().toISOString()),
+            workOrderIds: []
+          };
+        }
+      }
+
+      // 2. Sync Work Orders
       if (Array.isArray(data.workOrders)) {
         for (const wo of data.workOrders) {
           const upperWoId = String(wo.woId).trim().toUpperCase();
@@ -520,7 +544,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
           
           workOrdersDb[upperWoId] = {
             woId: upperWoId,
-            jobId: wo.jobId || `JOB-${upperWoId.replace('WO-', '')}`,
+            jobId: wo.jobId || undefined,
             projectName: wo.projectName || `Work Order ${upperWoId}`,
             customerName: wo.projectName ? wo.projectName.split(' - ')[0] : 'Customer',
             propertyAddress: 'Restoration Job Site',
@@ -528,7 +552,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
             unitArea: wo.unitArea || 'Work Area',
             subName: wo.subName || 'Subcontractor',
             subPhone: wo.subPhone || '',
-            assignedSubId: '',
+            assignedSubId: wo.assignedSubId || '',
             scheduledDate: wo.scheduledDate || '',
             status: wo.status || 'Open',
             totalItems: Number(wo.totalItems || 0),
@@ -537,10 +561,13 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
             signedAt: wo.signedAt || undefined,
             createdBy: 'Project Manager'
           };
+          if (wo.jobId && jobsDb[wo.jobId] && !jobsDb[wo.jobId].workOrderIds.includes(upperWoId)) {
+            jobsDb[wo.jobId].workOrderIds.push(upperWoId);
+          }
         }
       }
 
-      // 2. Sync Line Items
+      // 3. Sync Line Items
       if (data.lineItems && typeof data.lineItems === 'object') {
         for (const [woId, items] of Object.entries(data.lineItems)) {
           const upperWoId = String(woId).trim().toUpperCase();
@@ -550,7 +577,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
         }
       }
 
-      // 3. Sync Subcontractors from Sheets if present
+      // 4. Sync Subcontractors from Sheets if present
       if (Array.isArray(data.subcontractors)) {
         for (const sub of data.subcontractors) {
           if (!sub.email) continue;
@@ -594,7 +621,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
         }
       }
 
-      // 4. Sync Project Managers from Sheets if present
+      // 5. Sync Project Managers from Sheets if present
       if (Array.isArray(data.projectManagers)) {
         for (const pm of data.projectManagers) {
           if (!pm.email) continue;
@@ -668,6 +695,27 @@ if (!isServerlessRuntime) {
     console.warn('Initial background sync notice:', err?.message);
   });
 }
+
+// Vercel instances have no durable process memory. Hydrate the first request
+// on each instance from the configured Google Sheets source of truth so jobs,
+// subcontractor assignments, and punch-list tasks remain available after a
+// cold start or instance switch.
+let serverlessHydration: Promise<unknown> | null = null;
+app.use(async (_req, _res, next) => {
+  if (!isServerlessRuntime) {
+    next();
+    return;
+  }
+  try {
+    if (!serverlessHydration) {
+      serverlessHydration = syncFromGoogleSheets();
+    }
+    await serverlessHydration;
+  } catch (err: any) {
+    console.warn('Serverless Google Sheets hydration notice:', err?.message);
+  }
+  next();
+});
 
 // ----------------------------------------------------------------------------
 // API ROUTES
@@ -1236,7 +1284,7 @@ app.get('/api/jobs/:id', (req, res) => {
 });
 
 // 5d. Jobs: Create new Job (PM only)
-app.post('/api/jobs', (req, res) => {
+app.post('/api/jobs', async (req, res) => {
   const user = getUserFromRequest(req);
   if (!user || user.role !== 'pm') {
     return res.status(403).json({ success: false, error: 'Only Project Managers can create jobs' });
@@ -1266,6 +1314,13 @@ app.post('/api/jobs', (req, res) => {
   };
 
   jobsDb[id] = newJob;
+  saveDatabaseState();
+
+  try {
+    await callAppsScript('createJob', { job: newJob });
+  } catch (gasErr: any) {
+    console.warn('Apps Script createJob sync notice:', gasErr.message);
+  }
 
   activityLogsDb.unshift({
     id: `act_${Date.now()}`,
@@ -2094,7 +2149,10 @@ app.post('/api/work-orders', async (req, res) => {
     // Synchronize with Google Sheets database tabs (WorkOrders and LineItems)
     try {
       const gasResult = await callAppsScript('createWorkOrder', {
+        jobId: jobId || '',
         project: finalProjectName,
+        trade: trade || 'General Trade',
+        assignedSubId: resolvedSubId || '',
         unit: unitArea || 'General Area',
         subName: subName || 'Assigned Subcontractor',
         subPhone: subPhone || '',

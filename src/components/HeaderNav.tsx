@@ -16,7 +16,7 @@ import { WorkOrder, User } from '../types';
 import { HaysLogo } from './HaysLogo';
 import { PWAInstallButton } from './PWAInstallButton';
 
-export type AppTab = 'pm_hub' | 'pm_creator' | 'subcontractor';
+export type AppTab = 'pm_hub' | 'pm_creator' | 'pm_manual' | 'subcontractor';
 
 interface HeaderNavProps {
   currentTab: AppTab;
@@ -98,6 +98,21 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
             </button>
 
             {/* UPLOAD ESTIMATE */}
+            {!isSubcontractor && (
+              <button
+                id="nav-pm-manual-work-order"
+                onClick={() => setTab('pm_manual')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
+                  currentTab === 'pm_manual'
+                    ? 'bg-[#C81D25] text-white shadow-md font-bold'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                <span className="text-[#C81D25] bg-white rounded-full w-3.5 h-3.5 flex items-center justify-center text-[10px] font-black leading-none">+</span>
+                <span>Manual Work Order</span>
+              </button>
+            )}
+
             {!isSubcontractor && (
               <button
                 id="nav-pm-creator"
@@ -219,15 +234,15 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
         {!isSubcontractor && (
           <button
             id="mobile-nav-new-job"
-            onClick={() => setTab('pm_creator')}
+            onClick={() => setTab('pm_manual')}
             className={`flex flex-col items-center justify-center py-1 px-2 rounded-xl transition min-h-[44px] flex-1 ${
-              currentTab === 'pm_creator'
+              currentTab === 'pm_manual'
                 ? 'text-[#C81D25] font-bold'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <span className="text-base font-black leading-none mb-0.5">+</span>
-            <span className="text-[10px] leading-none">+ Estimate</span>
+            <span className="text-[10px] leading-none">New Work Order</span>
           </button>
         )}
 

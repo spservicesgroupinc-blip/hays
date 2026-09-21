@@ -3,6 +3,7 @@ import { HeaderNav, AppTab } from './components/HeaderNav';
 import { PMDashboard } from './components/PMDashboard';
 import { SubcontractorPortal } from './components/SubcontractorPortal';
 import { PMWorkOrderCreator } from './components/PMWorkOrderCreator';
+import { PMManualWorkOrderPage } from './components/PMManualWorkOrderPage';
 import { AuthModal } from './components/AuthModal';
 import { SubcontractorAuthPage } from './components/SubcontractorAuthPage';
 import { WorkOrder, LineItem, VerificationResponse, User } from './types';
@@ -410,6 +411,18 @@ export default function App() {
             preselectedSubId={creatorPreselectedSub?.id}
             preselectedSubName={creatorPreselectedSub?.company}
             preselectedSubPhone={creatorPreselectedSub?.phone}
+          />
+        )}
+
+        {currentTab === 'pm_manual' && (
+          <PMManualWorkOrderPage
+            currentUser={currentUser}
+            authToken={authToken}
+            onWorkOrderCreated={handleWorkOrderCreated}
+            onNavigateToJobs={() => {
+              setCurrentTab('pm_hub');
+              loadWorkOrdersList(authToken);
+            }}
           />
         )}
 

@@ -14,6 +14,7 @@ var CONFIG = {
   DRIVE_FOLDER_NAME: 'Hays_Sons_FieldProof_Photos',
   SHEET_WORK_ORDERS: 'WorkOrders',
   SHEET_LINE_ITEMS: 'LineItems',
+  SHEET_JOBS: 'Jobs',
   SHEET_SUBCONTRACTORS: 'Subcontractors',
   SHEET_PROJECT_MANAGERS: 'ProjectManagers',
   SHEET_ACTIVITY_LOG: 'Activity_Log',
@@ -25,6 +26,9 @@ var CONFIG = {
  * Automatically creates custom menu when the Google Sheet is opened.
  */
 function onOpen(e) {
+  // `onOpen` has a UI only when Google opens the bound spreadsheet. Running
+  // it directly from the Apps Script editor must not fail.
+  try {
   SpreadsheetApp.getUi()
     .createMenu('Hays + Sons FieldProof')
     .addItem('🚀 Setup All Sheets & Drive Folders (First Run)', 'setupFieldProofEnvironment')
@@ -32,6 +36,9 @@ function onOpen(e) {
     .addItem('📊 Refresh Database & Reindex Counts', 'refreshAllMetrics')
     .addItem('🌐 Launch Web App', 'openWebAppUrl_')
     .addToUi();
+  } catch (err) {
+    Logger.log('FieldProof menu was skipped because no spreadsheet UI is available: ' + err);
+  }
 }
 
 /**
@@ -126,8 +133,17 @@ function doPost(e) {
           contents.subPhone,
           contents.subEmail,
           contents.date,
-          contents.tasks
+          contents.tasks,
+          {
+            jobId: contents.jobId,
+            trade: contents.trade,
+            assignedSubId: contents.assignedSubId
+          }
         );
+        break;
+
+      case 'createJob':
+        responseData = createJob(contents.job || contents);
         break;
 
       case 'authenticateUser':
@@ -216,7 +232,7 @@ function setupFieldProofEnvironment() {
   if (ui) {
     ui.alert(
       'Hays + Sons FieldProof Setup Complete',
-      'All 4 sheets (WorkOrders, LineItems, Subcontractors, Activity_Log) and the Google Drive photo folder "' + 
+      'All project, work order, line item, subcontractor, and activity sheets and the Google Drive photo folder "' +
       CONFIG.DRIVE_FOLDER_NAME + '" have been created and formatted with zero mock data. The system is ready for live field use.',
       ui.ButtonSet.OK
     );
@@ -239,7 +255,8 @@ function initDatabase() {
   var woHeaders = [
     'WO ID', 'Project Name', 'Unit/Area', 'Sub Name', 
     'Sub Phone', 'Sub Email', 'Scheduled Date', 'Status', 
-    'Total Items', 'Completed Items', 'Signed By', 'Signed At'
+    'Total Items', 'Completed Items', 'Signed By', 'Signed At',
+    'Job ID', 'Trade', 'Assigned Sub ID'
   ];
   if (!woSheet) {
     woSheet = ss.insertSheet(CONFIG.SHEET_WORK_ORDERS);
@@ -250,6 +267,30 @@ function initDatabase() {
     woSheet.appendRow(woHeaders);
     formatHeaderRow_(woSheet, woHeaders.length, CONFIG.BRAND_COLOR);
     setupStatusValidation_(woSheet, 'H', ['Open', 'In Progress', 'Completed', 'Flagged']);
+  }
+
+  // Add relationship columns to existing WorkOrders sheets without changing
+  // historic rows or their original column positions.
+  for (var woCol = 0; woCol < woHeaders.length; woCol++) {
+    var woHeaderCell = woSheet.getRange(1, woCol + 1);
+    if (String(woHeaderCell.getValue()).trim() !== woHeaders[woCol]) {
+      woHeaderCell.setValue(woHeaders[woCol]).setBackground(CONFIG.BRAND_COLOR).setFontColor('#FFFFFF').setFontWeight('bold');
+    }
+  }
+
+  // 1b. Jobs Tab
+  var jobSheet = ss.getSheetByName(CONFIG.SHEET_JOBS);
+  var jobHeaders = [
+    'Job ID', 'Customer Name', 'Property Address', 'Phone', 'Email',
+    'Claim Number', 'Loss Type', 'Total Estimate', 'Notes', 'Scope Summary', 'Created At'
+  ];
+  if (!jobSheet) {
+    jobSheet = ss.insertSheet(CONFIG.SHEET_JOBS);
+    jobSheet.appendRow(jobHeaders);
+    formatHeaderRow_(jobSheet, jobHeaders.length, CONFIG.DARK_COLOR);
+  } else if (jobSheet.getLastRow() === 0) {
+    jobSheet.appendRow(jobHeaders);
+    formatHeaderRow_(jobSheet, jobHeaders.length, CONFIG.DARK_COLOR);
   }
 
   // 2. LineItems Tab
@@ -571,7 +612,7 @@ function authenticateUser(email, password) {
 /**
  * Creates a new Work Order and appends all individual line items.
  */
-function createWorkOrder(project, unit, subName, subPhone, subEmail, date, lineItemsArray) {
+function createWorkOrder(project, unit, subName, subPhone, subEmail, date, lineItemsArray, metadata) {
   initDatabase();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var woSheet = ss.getSheetByName(CONFIG.SHEET_WORK_ORDERS);
@@ -593,6 +634,7 @@ function createWorkOrder(project, unit, subName, subPhone, subEmail, date, lineI
   var status = 'Open';
 
   // Append Work Order Row
+  metadata = metadata || {};
   woSheet.appendRow([
     woId,
     project || 'Untitled Project',
@@ -605,7 +647,10 @@ function createWorkOrder(project, unit, subName, subPhone, subEmail, date, lineI
     totalItems,
     completedItems,
     '', // Signed By
-    ''  // Signed At
+    '', // Signed At
+    metadata.jobId || '',
+    metadata.trade || '',
+    metadata.assignedSubId || ''
   ]);
 
   // Append Line Items Rows
@@ -645,6 +690,34 @@ function createWorkOrder(project, unit, subName, subPhone, subEmail, date, lineI
     totalItems: totalItems,
     status: status
   };
+}
+
+/** Creates or updates the durable job record used to link manual work orders. */
+function createJob(job) {
+  initDatabase();
+  job = job || {};
+  if (!job.id || !job.customerName || !job.propertyAddress) {
+    throw new Error('Job ID, customer name, and property address are required.');
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var jobSheet = ss.getSheetByName(CONFIG.SHEET_JOBS);
+  var rows = jobSheet.getDataRange().getValues();
+  var values = [
+    job.id, job.customerName, job.propertyAddress, job.phone || '', job.email || '',
+    job.claimNumber || '', job.lossType || '', job.totalEstimate || '', job.notes || '',
+    job.scopeSummary || job.propertyAddress, job.createdAt || new Date().toISOString()
+  ];
+
+  for (var i = 1; i < rows.length; i++) {
+    if (String(rows[i][0]).trim() === String(job.id).trim()) {
+      jobSheet.getRange(i + 1, 1, 1, values.length).setValues([values]);
+      return { success: true, job: job, updated: true };
+    }
+  }
+
+  jobSheet.appendRow(values);
+  return { success: true, job: job, created: true };
 }
 
 /**
@@ -954,6 +1027,8 @@ function deleteJob(jobId, woIds) {
   initDatabase();
 
   var deletedWos = [];
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var jobSheet = ss.getSheetByName(CONFIG.SHEET_JOBS);
   if (Array.isArray(woIds)) {
     for (var k = 0; k < woIds.length; k++) {
       try {
@@ -961,6 +1036,16 @@ function deleteJob(jobId, woIds) {
         deletedWos.push(woIds[k]);
       } catch (err) {
         Logger.log('Notice deleting WO ' + woIds[k] + ': ' + err.toString());
+      }
+    }
+  }
+
+  if (jobSheet && jobSheet.getLastRow() > 1) {
+    var jobRows = jobSheet.getRange(2, 1, jobSheet.getLastRow() - 1, 1).getValues();
+    for (var j = jobRows.length - 1; j >= 0; j--) {
+      if (String(jobRows[j][0]).trim() === String(jobId).trim()) {
+        jobSheet.deleteRow(j + 2);
+        break;
       }
     }
   }
@@ -1040,6 +1125,7 @@ function fetchDatabaseState() {
   initDatabase();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var woSheet = ss.getSheetByName(CONFIG.SHEET_WORK_ORDERS);
+  var jobSheet = ss.getSheetByName(CONFIG.SHEET_JOBS);
   var lineSheet = ss.getSheetByName(CONFIG.SHEET_LINE_ITEMS);
   var subSheet = ss.getSheetByName(CONFIG.SHEET_SUBCONTRACTORS);
   var pmSheet = ss.getSheetByName(CONFIG.SHEET_PROJECT_MANAGERS);
@@ -1048,10 +1134,30 @@ function fetchDatabaseState() {
   var lineItems = {};
   var subcontractors = [];
   var projectManagers = [];
+  var jobs = [];
+
+  // 0. Read durable job records before attaching work orders below.
+  if (jobSheet && jobSheet.getLastRow() > 1) {
+    var jobData = jobSheet.getRange(2, 1, jobSheet.getLastRow() - 1, 11).getValues();
+    for (var h = 0; h < jobData.length; h++) {
+      var jobRow = jobData[h];
+      if (!jobRow[0]) continue;
+      jobs.push({
+        id: String(jobRow[0]).trim(),
+        customerName: String(jobRow[1] || ''),
+        propertyAddress: String(jobRow[2] || ''),
+        phone: String(jobRow[3] || ''), email: String(jobRow[4] || ''),
+        claimNumber: String(jobRow[5] || ''), lossType: String(jobRow[6] || ''),
+        totalEstimate: String(jobRow[7] || ''), notes: String(jobRow[8] || ''),
+        scopeSummary: String(jobRow[9] || ''), createdAt: String(jobRow[10] || ''),
+        workOrderIds: []
+      });
+    }
+  }
 
   // 1. Read Work Orders
   if (woSheet && woSheet.getLastRow() > 1) {
-    var woData = woSheet.getRange(2, 1, woSheet.getLastRow() - 1, 12).getValues();
+    var woData = woSheet.getRange(2, 1, woSheet.getLastRow() - 1, Math.max(woSheet.getLastColumn(), 15)).getValues();
     for (var i = 0; i < woData.length; i++) {
       var row = woData[i];
       if (!row[0]) continue;
@@ -1068,7 +1174,10 @@ function fetchDatabaseState() {
         totalItems: Number(row[8] || 0),
         completedItems: Number(row[9] || 0),
         signedBy: String(row[10] || ''),
-        signedAt: String(row[11] || '')
+        signedAt: String(row[11] || ''),
+        jobId: String(row[12] || ''),
+        trade: String(row[13] || ''),
+        assignedSubId: String(row[14] || '')
       });
       lineItems[woId] = [];
     }
@@ -1137,6 +1246,7 @@ function fetchDatabaseState() {
 
   return {
     success: true,
+    jobs: jobs,
     workOrders: workOrders,
     lineItems: lineItems,
     subcontractors: subcontractors,
