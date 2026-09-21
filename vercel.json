@@ -2,17 +2,17 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
   "functions": {
-    "api/**/*.ts": {
+    "api/index.ts": {
       "includeFiles": "data/**"
     }
   },
   "rewrites": [
     {
-      "source": "/api/(.*)",
-      "destination": "/api?path=$1"
+      "source": "/api/:path*",
+      "destination": "/api?path=:path*"
     },
     {
-      "source": "/((?!api/).*)",
+      "source": "/((?!api(?:/|$)).*)",
       "destination": "/index.html"
     }
   ]
