@@ -1,18 +1,20 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import app from '../server';
+import app from '../server.ts';
 
 export function normalizeVercelUrl(req: VercelRequest): void {
-  // 1. Check for original matched path headers injected by Vercel edge proxy
-  const matchedPath = (req.headers['x-matched-path'] || req.headers['x-forwarded-uri'] || req.headers['x-original-url']) as string | undefined;
-  if (matchedPath && typeof matchedPath === 'string' && matchedPath.startsWith('/api')) {
-    req.url = matchedPath;
+  // 1. Check for query path from vercel.json rewrite (e.g. ?path=auth/login) or catch-all
+  const queryPath = (req.query?.path || req.query?.all || req.query?.route) as string | string[] | undefined;
+  if (queryPath) {
+    const subpath = Array.isArray(queryPath) ? queryPath.join('/') : queryPath;
+    const cleanSubpath = subpath.startsWith('/') ? subpath.slice(1) : subpath;
+    req.url = `/api/${cleanSubpath}`;
     return;
   }
 
-  // 2. Check for catch-all query parameter (from [...all].ts or rewrites)
-  if (req.query?.all) {
-    const subpath = Array.isArray(req.query.all) ? req.query.all.join('/') : req.query.all;
-    req.url = `/api/${subpath}`;
+  // 2. Check for original matched path headers injected by Vercel edge proxy
+  const matchedPath = (req.headers['x-matched-path'] || req.headers['x-forwarded-uri'] || req.headers['x-original-url']) as string | undefined;
+  if (matchedPath && typeof matchedPath === 'string' && matchedPath.startsWith('/api')) {
+    req.url = matchedPath;
     return;
   }
 
@@ -22,7 +24,61 @@ export function normalizeVercelUrl(req: VercelRequest): void {
   }
 }
 
-export default function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
+  // Set CORS headers for serverless invocations
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MDX, Content-Type, Date, X-Api-Version, Authorization, x-user-id'
+  );
+
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
   normalizeVercelUrl(req);
-  return app(req as any, res as any);
+
+  return new Promise((resolve) => {
+    let finished = false;
+    const finishHandler = () => {
+      if (!finished) {
+        finished = true;
+        resolve();
+      }
+    };
+
+    res.once('finish', finishHandler);
+    res.once('close', finishHandler);
+    res.once('error', (err: any) => {
+      console.error('Vercel response stream error:', err);
+      finishHandler();
+    });
+
+    try {
+      (app as any)(req, res, (err: any) => {
+        if (err) {
+          console.error('Vercel Express unhandled middleware error:', err);
+          if (!res.headersSent) {
+            res.status(500).json({
+              success: false,
+              error: err?.message || 'Internal Server Error'
+            });
+          }
+        }
+        finishHandler();
+      });
+    } catch (topLevelError: any) {
+      console.error('Vercel top-level invocation error:', topLevelError);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: topLevelError?.message || 'Server invocation error'
+        });
+      }
+      finishHandler();
+    }
+  });
 }

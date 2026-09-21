@@ -2289,9 +2289,17 @@ async function startServer() {
   });
 }
 
-// In local and container environments, boot the server immediately.
-// In serverless environments (e.g. Vercel), the express app instance is exported for serverless handler execution.
-if (!process.env.VERCEL && process.env.NODE_ENV !== 'test') {
+const isDirectExecution = Boolean(
+  process.argv[1] && (
+    process.argv[1].endsWith('server.ts') || 
+    process.argv[1].endsWith('server.cjs') ||
+    process.argv[1].endsWith('server.js')
+  )
+);
+
+// In local and container environments, boot the server immediately when run directly.
+// When imported by serverless handlers (Vercel / Cloud Functions), the Express instance is exported.
+if (isDirectExecution && !process.env.VERCEL && process.env.NODE_ENV !== 'test') {
   startServer();
 }
 

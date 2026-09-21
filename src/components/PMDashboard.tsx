@@ -98,9 +98,8 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
     try {
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-      const res = await fetch('/api/jobs', { headers });
-      const data = await res.json();
-      if (data.success && Array.isArray(data.jobs)) {
+      const { ok, data } = await safeFetchJson<any>('/api/jobs', { headers });
+      if (ok && data?.success && Array.isArray(data.jobs)) {
         setJobs(data.jobs);
       }
     } catch (err) {
@@ -113,9 +112,8 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
     try {
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-      const res = await fetch('/api/pm/subcontractors', { headers });
-      const data = await res.json();
-      if (data.success && Array.isArray(data.subcontractors)) {
+      const { ok, data } = await safeFetchJson<any>('/api/pm/subcontractors', { headers });
+      if (ok && data?.success && Array.isArray(data.subcontractors)) {
         setSubcontractors(data.subcontractors);
       }
     } catch (err) {
@@ -128,9 +126,8 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
     try {
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-      const res = await fetch('/api/pm/activity-feed', { headers });
-      const data = await res.json();
-      if (data.success && Array.isArray(data.events)) {
+      const { ok, data } = await safeFetchJson<any>('/api/pm/activity-feed', { headers });
+      if (ok && data?.success && Array.isArray(data.events)) {
         setActivityFeed(data.events);
       }
     } catch (err) {
@@ -188,7 +185,7 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
 
       const selectedSub = subcontractors.find(s => s.id === woForm.assignedSubId);
 
-      const res = await fetch('/api/work-orders', {
+      const { ok, data } = await safeFetchJson<any>('/api/work-orders', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -203,13 +200,12 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
         })
       });
 
-      const data = await res.json();
-      if (data.success) {
+      if (ok && data?.success) {
         setShowAddWoModal(false);
         await Promise.all([fetchJobs(), fetchSubcontractors()]);
         if (onRefreshWorkOrders) onRefreshWorkOrders();
       } else {
-        alert(data.error || 'Failed to create work order');
+        alert(data?.error || 'Failed to create work order');
       }
     } catch (err: any) {
       alert('Error creating work order: ' + err.message);
@@ -225,16 +221,15 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
       if (currentUser?.id) headers['X-User-Id'] = currentUser.id;
-      const res = await fetch(`/api/work-orders/${encodeURIComponent(woId)}`, {
+      const { ok, data } = await safeFetchJson<any>(`/api/work-orders/${encodeURIComponent(woId)}`, {
         method: 'DELETE',
         headers
       });
-      const data = await res.json();
-      if (data.success) {
+      if (ok && data?.success) {
         await Promise.all([fetchJobs(), fetchSubcontractors()]);
         if (onRefreshWorkOrders) onRefreshWorkOrders();
       } else {
-        alert(data.error || 'Failed to delete work order');
+        alert(data?.error || 'Failed to delete work order');
       }
     } catch (err: any) {
       console.error('Failed to delete work order:', err);
@@ -249,16 +244,15 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
       if (currentUser?.id) headers['X-User-Id'] = currentUser.id;
-      const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+      const { ok, data } = await safeFetchJson<any>(`/api/jobs/${encodeURIComponent(jobId)}`, {
         method: 'DELETE',
         headers
       });
-      const data = await res.json();
-      if (data.success) {
+      if (ok && data?.success) {
         await Promise.all([fetchJobs(), fetchSubcontractors()]);
         if (onRefreshWorkOrders) onRefreshWorkOrders();
       } else {
-        alert(data.error || 'Failed to delete job');
+        alert(data?.error || 'Failed to delete job');
       }
     } catch (err: any) {
       console.error('Failed to delete job:', err);
@@ -273,15 +267,14 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
       if (currentUser?.id) headers['X-User-Id'] = currentUser.id;
-      const res = await fetch(`/api/pm/subcontractors/${encodeURIComponent(subId)}`, {
+      const { ok, data } = await safeFetchJson<any>(`/api/pm/subcontractors/${encodeURIComponent(subId)}`, {
         method: 'DELETE',
         headers
       });
-      const data = await res.json();
-      if (data.success) {
+      if (ok && data?.success) {
         await fetchSubcontractors();
       } else {
-        alert(data.error || 'Failed to delete subcontractor');
+        alert(data?.error || 'Failed to delete subcontractor');
       }
     } catch (err: any) {
       alert('Error deleting subcontractor: ' + err.message);

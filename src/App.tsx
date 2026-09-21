@@ -8,6 +8,7 @@ import { SubcontractorAuthPage } from './components/SubcontractorAuthPage';
 import { WorkOrder, LineItem, VerificationResponse, User } from './types';
 import { ShieldCheck, Sparkles } from 'lucide-react';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { safeFetchJson } from './utils/api';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<AppTab>('pm_hub');
@@ -47,16 +48,15 @@ export default function App() {
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const res = await fetch(`/api/work-orders/${encodeURIComponent(woId)}`, { headers });
-      const data = await res.json();
+      const { ok, status, data, error } = await safeFetchJson<any>(`/api/work-orders/${encodeURIComponent(woId)}`, { headers });
       
-      if (res.status === 403 || !data.success) {
-        if (res.status === 403) {
-          setAccessDeniedError(data.error || 'Access Denied: You do not have permission to view this work order.');
+      if (status === 403 || !ok || !data?.success) {
+        if (status === 403) {
+          setAccessDeniedError(data?.error || 'Access Denied: You do not have permission to view this work order.');
           setCurrentWorkOrder(null);
           setLineItems([]);
         } else {
-          showToast(data.error || 'Work Order not found', 'error');
+          showToast(error || data?.error || 'Work Order not found', 'error');
         }
       } else {
         setAccessDeniedError(null);
@@ -75,9 +75,8 @@ export default function App() {
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const res = await fetch('/api/work-orders', { headers });
-      const data = await res.json();
-      if (data.success && data.workOrders) {
+      const { ok, data } = await safeFetchJson<any>('/api/work-orders', { headers });
+      if (ok && data?.success && data.workOrders) {
         setWorkOrders(data.workOrders);
         
         let activeId = targetWoId || selectedWoId;
@@ -107,36 +106,29 @@ export default function App() {
     }
 
     // Health check
-    fetch('/api/health').catch(() => {});
+    safeFetchJson('/api/health').catch(() => {});
 
     const initAuth = async () => {
       let token = authToken;
 
       if (token) {
-        fetch('/api/auth/me', {
+        const { ok, data } = await safeFetchJson<any>('/api/auth/me', {
           headers: { 'Authorization': `Bearer ${token}` }
-        })
-          .then(res => res.json())
-          .then(data => {
-            if (data.success && data.user) {
-              setCurrentUser(data.user);
-              if (data.user.role === 'subcontractor') {
-                setCurrentTab('subcontractor');
-              } else {
-                setCurrentTab('pm_hub');
-              }
-              loadWorkOrdersList(token, initialWo);
-            } else {
-              setCurrentUser(null);
-              setAuthToken(null);
-              localStorage.removeItem('fieldproof_auth_token');
-            }
-          })
-          .catch(() => {
-            setCurrentUser(null);
-            setAuthToken(null);
-            localStorage.removeItem('fieldproof_auth_token');
-          });
+        });
+
+        if (ok && data?.success && data.user) {
+          setCurrentUser(data.user);
+          if (data.user.role === 'subcontractor') {
+            setCurrentTab('subcontractor');
+          } else {
+            setCurrentTab('pm_hub');
+          }
+          loadWorkOrdersList(token, initialWo);
+        } else {
+          setCurrentUser(null);
+          setAuthToken(null);
+          localStorage.removeItem('fieldproof_auth_token');
+        }
       }
     };
 
@@ -200,7 +192,7 @@ export default function App() {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
-      const response = await fetch('/api/verify-photo', {
+      const { ok, status, data } = await safeFetchJson<VerificationResponse>('/api/verify-photo', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -212,15 +204,14 @@ export default function App() {
         })
       });
 
-      if (response.status === 403) {
-        const errData = await response.json();
-        showToast(errData.error || 'Access Denied: You cannot upload photos for unassigned work orders.', 'error');
-        setAccessDeniedError(errData.error);
+      if (status === 403) {
+        showToast(data?.error || 'Access Denied: You cannot upload photos for unassigned work orders.', 'error');
+        setAccessDeniedError(data?.error || 'Access Denied');
         return;
       }
 
-      const res: VerificationResponse = await response.json();
-      if (res.success) {
+      const res = data;
+      if (ok && res?.success) {
         // Update local line items state
         setLineItems(prev => prev.map(item => {
           if (item.lineId === lineId) {
@@ -249,7 +240,7 @@ export default function App() {
 
         showToast('Inspection photo submitted successfully!', 'success');
       } else {
-        showToast(res.error || 'Verification failed', 'error');
+        showToast(res?.error || 'Verification failed', 'error');
       }
     } catch (err: any) {
       showToast('Network error during photo upload: ' + err.message, 'error');
@@ -264,25 +255,23 @@ export default function App() {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
-      const response = await fetch(`/api/work-orders/${encodeURIComponent(selectedWoId)}/sign-off`, {
+      const { ok, status, data } = await safeFetchJson<any>(`/api/work-orders/${encodeURIComponent(selectedWoId)}/sign-off`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ signatureName: signerName })
       });
 
-      if (response.status === 403) {
-        const errData = await response.json();
-        showToast(errData.error || 'Access Denied', 'error');
+      if (status === 403) {
+        showToast(data?.error || 'Access Denied', 'error');
         return;
       }
 
-      const data = await response.json();
-      if (data.success) {
+      if (ok && data?.success) {
         setCurrentWorkOrder(data.workOrder);
         setWorkOrders(prev => prev.map(w => w.woId === data.workOrder.woId ? data.workOrder : w));
         showToast(`Work order signed off by ${signerName}! Stored in Sheets.`, 'success');
       } else {
-        showToast(data.error || 'Sign off failed', 'error');
+        showToast(data?.error || 'Sign off failed', 'error');
       }
     } catch (err: any) {
       showToast('Sign-off error: ' + err.message, 'error');

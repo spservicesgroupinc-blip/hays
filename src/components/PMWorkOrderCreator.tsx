@@ -18,6 +18,7 @@ import {
   Check
 } from 'lucide-react';
 import { WorkOrder, User, ExtractedJobData, Job } from '../types';
+import { safeFetchJson } from '../utils/api';
 
 interface PMWorkOrderCreatorProps {
   onWorkOrderCreated: (newWo: WorkOrder) => Promise<void>;
@@ -62,10 +63,9 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
 
   // Load registered subcontractors
   React.useEffect(() => {
-    fetch('/api/subcontractors')
-      .then(res => res.json())
-      .then(data => {
-        if (data.success && Array.isArray(data.subcontractors) && data.subcontractors.length > 0) {
+    safeFetchJson<any>('/api/subcontractors')
+      .then(({ ok, data }) => {
+        if (ok && data?.success && Array.isArray(data.subcontractors) && data.subcontractors.length > 0) {
           setSubcontractors(data.subcontractors);
         }
       })
@@ -105,7 +105,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
-      const response = await fetch('/api/ai/extract-job-from-pdf', {
+      const { ok, data: extractData, error: extractError } = await safeFetchJson<any>('/api/ai/extract-job-from-pdf', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -117,9 +117,9 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
         })
       });
 
-      const result = await response.json();
-      if (!result.success && !result.data) {
-        throw new Error(result.error || 'Failed to extract estimate information.');
+      const result = extractData;
+      if (!ok || (!result?.success && !result?.data)) {
+        throw new Error(extractError || result?.error || 'Failed to extract estimate information.');
       }
 
       const data: ExtractedJobData = result.data;
@@ -199,7 +199,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
 
         const sub = subcontractors.find(s => s.id === item.subId);
 
-        const res = await fetch('/api/work-orders', {
+        const { ok, data } = await safeFetchJson<any>('/api/work-orders', {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -214,8 +214,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
           })
         });
 
-        const data = await res.json();
-        if (data.success && data.workOrder) {
+        if (ok && data?.success && data.workOrder) {
           item.isCreated = true;
           item.createdWoId = data.workOrder.woId;
           await onWorkOrderCreated(data.workOrder);
