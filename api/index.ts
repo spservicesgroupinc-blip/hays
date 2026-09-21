@@ -2,32 +2,52 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import app from '../server';
 
 export function normalizeVercelUrl(req: VercelRequest): void {
-  // 1. Check for query path from vercel.json rewrite (e.g. ?path=auth/login) or catch-all
+  const initialUrl = req.url || '';
+  const initialPath = initialUrl.split('?')[0];
+
+  // 1. If req.url is already a concrete sub-path (e.g. /api/auth/register or /auth/register)
+  if (initialPath && initialPath !== '/' && initialPath !== '/api' && initialPath !== '/api/') {
+    const stripped = initialPath.replace(/^\/api\/?/, '/');
+    const queryString = initialUrl.includes('?') ? '?' + initialUrl.split('?')[1] : '';
+    req.url = `/api${stripped}${queryString}`;
+    return;
+  }
+
+  // 2. Check for query path from vercel.json rewrite (e.g. ?path=auth/register) or catch-all ([...all].ts)
   const queryPath = (req.query?.path || req.query?.all || req.query?.route) as string | string[] | undefined;
   if (queryPath) {
-    const subpath = Array.isArray(queryPath) ? queryPath.join('/') : queryPath;
-    const cleanSubpath = subpath.startsWith('/') ? subpath.slice(1) : subpath;
-    
-    const originalQueryString = req.url?.includes('?') ? req.url.split('?')[1] : '';
-    const searchParams = new URLSearchParams(originalQueryString);
-    searchParams.delete('path');
-    searchParams.delete('all');
-    searchParams.delete('route');
-    const remainingQuery = searchParams.toString();
+    const rawSubpath = Array.isArray(queryPath) ? queryPath.join('/') : String(queryPath);
+    const cleanSubpath = rawSubpath.replace(/^\/+/, '').replace(/^api\/?/, '');
 
-    req.url = `/api/${cleanSubpath}${remainingQuery ? `?${remainingQuery}` : ''}`;
-    return;
+    if (cleanSubpath) {
+      const originalQueryString = initialUrl.includes('?') ? initialUrl.split('?')[1] : '';
+      const searchParams = new URLSearchParams(originalQueryString);
+      searchParams.delete('path');
+      searchParams.delete('all');
+      searchParams.delete('route');
+      const remainingQuery = searchParams.toString();
+
+      req.url = `/api/${cleanSubpath}${remainingQuery ? `?${remainingQuery}` : ''}`;
+      return;
+    }
   }
 
-  // 2. Check for original matched path headers injected by Vercel edge proxy
-  const matchedPath = (req.headers['x-matched-path'] || req.headers['x-forwarded-uri'] || req.headers['x-original-url']) as string | undefined;
-  if (matchedPath && typeof matchedPath === 'string' && matchedPath.startsWith('/api')) {
-    req.url = matchedPath;
-    return;
+  // 3. Check for original matched path headers injected by Vercel edge proxy
+  const proxyHeader = (req.headers['x-forwarded-uri'] || req.headers['x-original-url'] || req.headers['x-rewrite-url']) as string | undefined;
+  if (proxyHeader && typeof proxyHeader === 'string') {
+    const headerPath = proxyHeader.split('?')[0];
+    if (headerPath !== '/' && headerPath !== '/api' && headerPath !== '/api/') {
+      const stripped = headerPath.replace(/^\/api\/?/, '/');
+      const queryString = proxyHeader.includes('?') ? '?' + proxyHeader.split('?')[1] : '';
+      req.url = `/api${stripped}${queryString}`;
+      return;
+    }
   }
 
-  // 3. Ensure req.url has /api prefix
-  if (req.url && !req.url.startsWith('/api')) {
+  // 4. Default: ensure valid root /api route
+  if (!req.url || req.url === '/' || req.url === '') {
+    req.url = '/api';
+  } else if (!req.url.startsWith('/api')) {
     req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
   }
 }
@@ -70,12 +90,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
     };
 
-    res.once('finish', finishHandler);
-    res.once('close', finishHandler);
-    res.once('error', (err: any) => {
-      console.error('Vercel response stream error:', err);
-      finishHandler();
-    });
+    if (typeof (res as any).once === 'function') {
+      res.once('finish', finishHandler);
+      res.once('close', finishHandler);
+      res.once('error', (err: any) => {
+        console.error('Vercel response stream error:', err);
+        finishHandler();
+      });
+    } else if (typeof (res as any).on === 'function') {
+      (res as any).on('finish', finishHandler);
+      (res as any).on('close', finishHandler);
+    }
+
+    if (typeof (res as any).end === 'function') {
+      const originalEnd = (res as any).end.bind(res);
+      (res as any).end = function(...args: any[]) {
+        finishHandler();
+        return originalEnd(...args);
+      };
+    }
 
     try {
       (app as any)(req, res, (err: any) => {

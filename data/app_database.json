@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "savedAt": "2026-09-21T17:23:15.137Z",
+  "savedAt": "2026-09-21T17:40:14.592Z",
   "customAppsScriptUrl": "https://script.google.com/macros/s/AKfycbyEtLFk6mTeOHbYQZrR4ct-g00gmA8yRJSuM4mnTGq-dt7asGtn4yNtEpI4yoU-9NlryA/exec",
   "users": {
     "usr_pm_default": {
@@ -181,8 +181,8 @@
         "upload_inspection_photo",
         "sign_off_work_order"
       ],
-      "salt": "salt_sub_1790010236567",
-      "passwordHash": "3f905a5f0c04f0018a0bbaf1152a2c1d14d9f4302bc0d7f4f756db26b1fd7d944aa11282d2d9b89b6538ab37f2584a2851debe7e874ca9fce2fb918d6eaf2e0e",
+      "salt": "salt_sub_1790012414588",
+      "passwordHash": "9e65d6e014a369aff6cb4db329eff524d3b221cb9947f059b865a27fb681c23d88620f29b1699ccb536cba855e3861236e6ee54b06e21623193e3a5f148afa40",
       "tempPassword": "password123",
       "password": "password123",
       "createdAt": "2026-09-21T16:57:46.260Z"
@@ -201,8 +201,8 @@
         "upload_inspection_photo",
         "sign_off_work_order"
       ],
-      "salt": "salt_sub_1790010236568",
-      "passwordHash": "5bacdd7cfebf3821967ae81748c23a59249b2da8744f42652b58c019f4ca5d4a539d475149cacdaad4ebce3923ca55434c6ed5723d60bc7517312052b5565bb0",
+      "salt": "salt_sub_1790012414588",
+      "passwordHash": "9e65d6e014a369aff6cb4db329eff524d3b221cb9947f059b865a27fb681c23d88620f29b1699ccb536cba855e3861236e6ee54b06e21623193e3a5f148afa40",
       "tempPassword": "password123",
       "password": "password123",
       "createdAt": "2026-09-21T16:59:34.455Z"
@@ -221,8 +221,8 @@
         "upload_inspection_photo",
         "sign_off_work_order"
       ],
-      "salt": "salt_sub_1790010236569",
-      "passwordHash": "fea85ebe895789533a975349c5c81f852cb1325e9b0529cd8bd0eed288cb166cb597a245e4e4b732a5aa3b13d600fde7ccf1167171b320bc22308890e3e64582",
+      "salt": "salt_sub_1790012414589",
+      "passwordHash": "217c76c7c72b04eb5355da4b4888609946513b4650805f748e32ad6c749e3f48b47a5b380b90595b9ea05a9f713e83f4cea83621eb115744eeb98276150b426e",
       "tempPassword": "Password123!",
       "password": "Password123!",
       "createdAt": "2026-09-21T17:03:37.805Z"
@@ -241,8 +241,8 @@
         "upload_inspection_photo",
         "sign_off_work_order"
       ],
-      "salt": "2190423e2c8c835203dc0f04f098135b",
-      "passwordHash": "babf74b48b6387ab42fa8e06d14e777b3f9d8bc114df9fb313a41481747a1173c77c584e0b06b09108c882c38e8fafb7e72c8c0aef0dfd2bd7e106694b6d31b9",
+      "salt": "salt_sub_1790012414590",
+      "passwordHash": "fc4539047bf810cad60c467d56b5baad9bf69eb8e407503f1ec3dcd8fb9a20adf723a950de21f758a6ac3f7b93561b8bfe1ef1a2793ff3839a2397a431178396",
       "tempPassword": "Password123!",
       "password": "Password123!",
       "createdAt": "2026-09-21T17:23:04.494Z"
@@ -261,17 +261,69 @@
         "upload_inspection_photo",
         "sign_off_work_order"
       ],
-      "salt": "90a58902e2e1782e0b646c94353c627c",
-      "passwordHash": "a2373df1928e4c172ffda2a006cd546bd17d81cf42ce881d4d29a0179f0b09fa955911c6ffae25c5e6709a8eb3e998e60e83d8373a0f34527b1ab1b84be9f970",
+      "salt": "salt_sub_1790012414590",
+      "passwordHash": "fc4539047bf810cad60c467d56b5baad9bf69eb8e407503f1ec3dcd8fb9a20adf723a950de21f758a6ac3f7b93561b8bfe1ef1a2793ff3839a2397a431178396",
       "tempPassword": "Password123!",
       "password": "Password123!",
       "createdAt": "2026-09-21T17:23:15.136Z"
+    },
+    "usr_pm_1790012045240": {
+      "id": "usr_pm_1790012045240",
+      "email": "r@r.com",
+      "name": "ryan",
+      "role": "pm",
+      "company": "t",
+      "trade": "General Restoration & Project Management",
+      "phone": "",
+      "assignedWoIds": [],
+      "permissions": [
+        "create_work_order",
+        "view_all_work_orders",
+        "edit_work_order",
+        "delete_work_order",
+        "view_analytics"
+      ],
+      "salt": "salt_pm_1790012414591",
+      "passwordHash": "f6a9e9d4ffd31eec183d1c263805563fe904b5fbd846957e5c4ab7f9b9c67dd47f5c0c455f2857a5ffee185d19d7ff815e9416e795af10c4217585ad5723df11",
+      "tempPassword": "rjames98",
+      "password": "rjames98",
+      "createdAt": "2026-09-21T17:34:05.240Z"
+    },
+    "usr_subcontractor_1790012410034": {
+      "id": "usr_subcontractor_1790012410034",
+      "email": "test_sub_1790012410031@fieldproof.com",
+      "name": "Alex Mason",
+      "role": "subcontractor",
+      "company": "Mason Electric Co",
+      "trade": "Trade Subcontractor",
+      "phone": "(555) 777-8899",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "97c50a3ad08d698061e63c3e4ee5ede3",
+      "passwordHash": "ca3a97da5c424e9fc4df3f58cafbc0d55bc08d523f686b150ee88deccee922683374fd934a0ec316e033d99ac7a462bd699f45a7540f28f9c73f1609e9c5f7d0",
+      "tempPassword": "Password123!",
+      "password": "Password123!",
+      "createdAt": "2026-09-21T17:40:10.034Z"
     }
   },
   "workOrders": {},
   "lineItems": {},
   "jobs": {},
   "activityLogs": [
+    {
+      "id": "act_1790012410053",
+      "timestamp": "05:40 PM",
+      "type": "sub_created",
+      "subId": "usr_subcontractor_1790012410034",
+      "subName": "Alex Mason",
+      "company": "Mason Electric Co",
+      "taskDescription": "Subcontractor account created (Trade Subcontractor)",
+      "notes": "Registered via portal"
+    },
     {
       "id": "act_1790009866280",
       "timestamp": "04:57 PM",

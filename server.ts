@@ -723,7 +723,11 @@ app.get('/api/auth/status', (req, res) => {
 
 app.post('/api/auth/quick-login', (req, res) => {
   ensureSeedUsers();
-  const { role } = req.body || {};
+  let body = req.body || {};
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { /* ignore */ }
+  }
+  const { role } = body;
   const targetRole = role === 'subcontractor' ? 'subcontractor' : 'pm';
   let user = Object.values(usersDb).find(u => u.role === targetRole);
   if (!user) {
@@ -759,7 +763,12 @@ app.post('/api/sync/refresh', async (req, res) => {
 // 2. Authentication: Create Project Manager Account (Setup)
 app.post('/api/auth/register-pm', async (req, res) => {
   try {
-    const { name, email, company, phone, password } = req.body;
+    ensureSeedUsers();
+    let body = req.body || {};
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch { /* ignore */ }
+    }
+    const { name, email, company, phone, password } = body;
     if (!name || !email || !password) {
       return res.status(400).json({ success: false, error: 'Full Name, Email Address, and Password are required.' });
     }
@@ -827,7 +836,7 @@ app.post('/api/auth/register-pm', async (req, res) => {
       company: newPm.company,
       phone: newPm.phone,
       password
-    }).catch(e => console.error('Cloud sheet PM creation sync notice:', e.message));
+    }, 3000).catch(e => console.error('Cloud sheet PM creation sync notice:', e.message));
 
     res.json({
       success: true,
@@ -843,7 +852,11 @@ app.post('/api/auth/register-pm', async (req, res) => {
 // 3. Authentication: Login
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    let body = req.body || {};
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch { /* ignore */ }
+    }
+    const { email, password } = body;
     if (!email || !password) {
       return res.status(400).json({ success: false, error: 'Email and password are required.' });
     }
@@ -854,6 +867,11 @@ app.post('/api/auth/login', async (req, res) => {
     const trimmedPass = String(password).trim();
 
     let user = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
+
+    if (!user) {
+      loadDatabaseState();
+      user = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
+    }
 
     // Friendly aliases for easy login
     if (!user && (cleanEmail === 'pm@haysandsons.com' || cleanEmail === 'pm')) {
