@@ -1,0 +1,6 @@
+{
+  "name": "FieldProof",
+  "description": "Subcontractor Line-Item Photo Checklist with AI PDF estimate extraction, real-time photographic verification, and cloud synchronization.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

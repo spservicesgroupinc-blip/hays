@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>FieldProof: Subcontractor Line-Item Photo Checklist</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0fdf4',
+              500: '#16a34a',
+              600: '#15803d',
+              700: '#166534',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Prevent pull-to-refresh on mobile while retaining scroll */
+    body {
+      overscroll-behavior-y: contain;
+      -webkit-tap-highlight-color: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .spin {
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-900 min-h-screen pb-24 antialiased selection:bg-emerald-500 selection:text-white">
+
+  <!-- Toast Notification -->
+  <div id="toast" class="fixed top-4 left-1/2 -translate-x-1/2 z-50 transform transition-all duration-300 opacity-0 pointer-events-none translate-y-[-20px] max-w-sm w-11/12">
+    <div id="toastInner" class="bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 border border-slate-700 text-sm font-medium">
+      <span id="toastIcon">ℹ️</span>
+      <span id="toastMsg" class="flex-1">Notification</span>
+    </div>
+  </div>
+
+  <!-- Apps Script Injected Variables -->
+  <script>
+    // Injected by Apps Script template or fallback from URL
+    window.INITIAL_WO_ID = "<?= initialWoId ?>" || new URLSearchParams(window.location.search).get('woId') || '';
+    window.SCRIPT_URL = "<?= scriptUrl ?>" || window.location.href.split('?')[0];
+  </script>
+
+  <!-- ========================================================================= -->
+  <!-- 1. SUBCONTRACTOR VIEW (Active when woId is present)                       -->
+  <!-- ========================================================================= -->
+  <div id="subcontractorView" class="hidden">
+    <!-- Sticky Header & Live Progress -->
+    <header class="sticky top-0 z-30 bg-slate-900 text-white shadow-lg border-b border-slate-800">
+      <div class="max-w-xl mx-auto px-4 py-3">
+        <div class="flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                FIELDPROOF
+              </span>
+              <span id="headerWoId" class="text-xs font-mono font-semibold text-slate-400">WO-....</span>
+            </div>
+            <h1 id="headerProjectName" class="text-base font-bold text-white truncate leading-tight mt-0.5">Loading Job...</h1>
+            <p id="headerUnit" class="text-xs text-slate-300 truncate">Please wait</p>
+          </div>
+          <div class="text-right shrink-0">
+            <span id="headerPercent" class="text-xl font-black text-emerald-400">0%</span>
+            <div id="headerRatio" class="text-[11px] font-semibold text-slate-400">0 of 0</div>
+          </div>
+        </div>
+
+        <!-- Animated Progress Bar -->
+        <div class="mt-2.5 bg-slate-800 rounded-full h-2.5 overflow-hidden p-0.5 border border-slate-700">
+          <div id="progressBar" class="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-500 ease-out" style="width: 0%"></div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="max-w-xl mx-auto px-4 pt-4 pb-20 space-y-4">
+      
+      <!-- Subcontractor banner info -->
+      <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 flex items-center justify-between gap-3">
+        <div>
+          <div class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Assigned Subcontractor</div>
+          <div id="subInfoName" class="font-bold text-slate-800 text-sm">--</div>
+          <div id="subInfoDate" class="text-xs text-slate-500 mt-0.5">Scheduled: --</div>
+        </div>
+        <div class="text-right">
+          <span id="woStatusBadge" class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
+            Open
+          </span>
+        </div>
+      </div>
+
+      <!-- Instructions notice -->
+      <div class="bg-blue-50/80 border border-blue-200/80 rounded-xl p-3.5 flex gap-3 text-xs text-blue-900 leading-relaxed">
+        <svg class="w-5 h-5 text-blue-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <div>
+          <strong class="font-semibold block text-blue-950 mb-0.5">Line-Item Verification Mandatory</strong>
+          Snap a clear photo for each scope item before leaving the job site.
+        </div>
+      </div>
+
+      <!-- Line Items List -->
+      <div id="lineItemsContainer" class="space-y-4">
+        <!-- Rendered dynamically -->
+      </div>
+    </main>
+
+    <!-- Sticky Bottom Sign-Off Bar -->
+    <div class="fixed bottom-0 inset-x-0 bg-white/95 backdrop-blur border-t border-slate-200 p-3 z-40 shadow-xl">
+      <div class="max-w-xl mx-auto flex items-center gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-xs text-slate-500 font-medium">Job Completion</div>
+          <div id="bottomStatusText" class="text-xs font-bold text-slate-800 truncate">0 of 0 verified</div>
+        </div>
+        <button id="btnSignOff" onclick="openSignOffModal()" disabled class="px-5 py-3 rounded-xl font-bold text-sm bg-slate-200 text-slate-400 cursor-not-allowed transition-all duration-200 flex items-center gap-2 shadow-sm">
+          <span>Complete & Sign Off</span>
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- 2. PM WORK ORDER CREATOR VIEW (Active when no woId is passed)             -->
+  <!-- ========================================================================= -->
+  <div id="pmView" class="hidden max-w-2xl mx-auto px-4 py-8">
+    <div class="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+      <!-- PM Header -->
+      <div class="bg-slate-900 text-white p-6 border-b border-slate-800">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="bg-emerald-500 text-slate-950 font-black text-xs px-2.5 py-1 rounded">PM DASHBOARD</span>
+            <span class="text-xs text-slate-400 font-mono">FieldProof v2.0</span>
+          </div>
+        </div>
+        <h1 class="text-2xl font-black tracking-tight mt-3">Create Subcontractor Work Order</h1>
+        <p class="text-sm text-slate-400 mt-1">
+          Define line-item scope requirements. Generates a frictionless zero-login mobile link for your trade subcontractor.
+        </p>
+      </div>
+
+      <!-- Creation Form -->
+      <form id="createWoForm" onsubmit="handleCreateWorkOrder(event)" class="p-6 space-y-6">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">Project Name *</label>
+            <input type="text" id="inputProject" required placeholder="e.g. 1420 North Meridian Restoration" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none transition">
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">Unit / Room / Area *</label>
+            <input type="text" id="inputUnit" required placeholder="e.g. Unit 302 - Master Bath & Chase" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none transition">
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">Subcontractor Business / Lead *</label>
+            <input type="text" id="inputSubName" required placeholder="e.g. Smith Drywall Specialists LLC" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none transition">
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">Subcontractor Phone</label>
+            <input type="tel" id="inputSubPhone" placeholder="e.g. (260) 555-0199" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none transition">
+          </div>
+          <div class="sm:col-span-2">
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">Scheduled Work Date</label>
+            <input type="date" id="inputDate" class="w-full sm:w-1/2 px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none transition">
+          </div>
+        </div>
+
+        <!-- Line Item Builder -->
+        <div class="border-t border-slate-200 pt-6">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <h2 class="text-base font-bold text-slate-900">Line-Item Scope Checklist</h2>
+              <p class="text-xs text-slate-500">Each line item requires an individual verified photo.</p>
+            </div>
+            <button type="button" onclick="addLineItemInput()" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-900 text-white hover:bg-slate-800 transition">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+              </svg>
+              <span>Add Task</span>
+            </button>
+          </div>
+
+          <!-- Quick Scope Presets -->
+          <div class="mb-4">
+            <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Quick Scope Presets:</span>
+            <div class="flex flex-wrap gap-1.5 mt-1.5">
+              <button type="button" onclick="addPresetTask('Fire-caulk all electrical and plumbing penetrations through rated drywall')" class="text-xs bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 px-2.5 py-1 rounded-lg border border-slate-200 transition">
+                + Fire-caulking
+              </button>
+              <button type="button" onclick="addPresetTask('Install OSB draft-stopping fire barrier between floors')" class="text-xs bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 px-2.5 py-1 rounded-lg border border-slate-200 transition">
+                + Fire Barrier
+              </button>
+              <button type="button" onclick="addPresetTask('Cut out and verify all electrical outlet and junction boxes cleanly')" class="text-xs bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 px-2.5 py-1 rounded-lg border border-slate-200 transition">
+                + Outlet Cutouts
+              </button>
+              <button type="button" onclick="addPresetTask('Install resilient hat channel at 16-inch OC across main ceiling')" class="text-xs bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 px-2.5 py-1 rounded-lg border border-slate-200 transition">
+                + Hat Channel
+              </button>
+              <button type="button" onclick="addPresetTask('Mud and tape joints to Level 4 smooth finish ready for paint')" class="text-xs bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 px-2.5 py-1 rounded-lg border border-slate-200 transition">
+                + Mud & Tape
+              </button>
+            </div>
+          </div>
+
+          <div id="tasksList" class="space-y-2.5">
+            <!-- Dynamic task rows -->
+          </div>
+        </div>
+
+        <!-- Submit Button -->
+        <div class="pt-4 border-t border-slate-200">
+          <button type="submit" id="btnSubmitWo" class="w-full py-3.5 px-4 rounded-xl font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2">
+            <span>Generate Subcontractor Work Order Link</span>
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+            </svg>
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Generated Link Modal / Callout -->
+    <div id="generatedLinkBox" class="hidden mt-6 bg-white rounded-2xl p-6 shadow-xl border-2 border-emerald-500">
+      <div class="flex items-center gap-3 text-emerald-600 font-bold mb-2">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span class="text-lg">Work Order Created Successfully!</span>
+      </div>
+      <p class="text-xs text-slate-600 mb-3">Send this direct link to the subcontractor via SMS or WhatsApp. No login or app installation required.</p>
+      
+      <div class="flex gap-2">
+        <input type="text" id="generatedUrlInput" readonly class="flex-1 bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-800">
+        <button onclick="copyGeneratedLink()" class="px-4 py-2.5 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 transition shrink-0">
+          Copy Link
+        </button>
+      </div>
+
+      <div class="mt-4 flex items-center justify-between pt-3 border-t border-slate-100">
+        <span id="createdWoBadge" class="text-xs font-mono font-bold text-slate-500">WO-....</span>
+        <a id="openDirectLink" href="#" target="_blank" class="text-xs font-bold text-emerald-600 hover:underline inline-flex items-center gap-1">
+          <span>Open Field Sub View</span>
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+          </svg>
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- SIGN OFF / COMPLETION MODAL                                               -->
+  <!-- ========================================================================= -->
+  <div id="signOffModal" class="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm hidden items-center justify-center p-4">
+    <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl p-6 border border-slate-200">
+      <div class="w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-3">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+        </svg>
+      </div>
+      <h3 class="text-lg font-black text-center text-slate-900">Sign Off & Complete Job</h3>
+      <p class="text-xs text-slate-500 text-center mt-1">
+        All line items have passed AI inspection. Enter your name to confirm completion.
+      </p>
+
+      <div class="mt-4 space-y-3">
+        <div>
+          <label class="block text-xs font-bold text-slate-600 mb-1">Subcontractor Lead Name</label>
+          <input type="text" id="inputSignerName" placeholder="e.g. Marcus Vance" class="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none">
+        </div>
+        <div class="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+          Timestamped verification record and Drive photo links will be locked in the central project spreadsheet.
+        </div>
+      </div>
+
+      <div class="mt-6 flex gap-2">
+        <button onclick="closeSignOffModal()" class="flex-1 py-2.5 px-4 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50">
+          Cancel
+        </button>
+        <button onclick="submitWorkOrderSignOff()" id="btnConfirmSignOff" class="flex-1 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-lg shadow-emerald-600/20">
+          Confirm Completion
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div id="globalLoader" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center hidden">
+    <div class="bg-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 border border-slate-200">
+      <svg class="w-6 h-6 text-emerald-600 spin" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+      </svg>
+      <span id="loaderText" class="text-sm font-bold text-slate-800">Processing...</span>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- FRONTEND LOGIC                                                            -->
+  <!-- ========================================================================= -->
+  <script>
+    var currentWoData = null;
+    var currentLineItems = [];
+
+    // Initialize View on Page Load
+    document.addEventListener('DOMContentLoaded', function() {
+      // Set default scheduled date to today
+      var dateInput = document.getElementById('inputDate');
+      if (dateInput) {
+        var today = new Date().toISOString().split('T')[0];
+        dateInput.value = today;
+      }
+
+      var woId = window.INITIAL_WO_ID;
+      if (woId) {
+        // Show Subcontractor View
+        document.getElementById('subcontractorView').classList.remove('hidden');
+        document.getElementById('pmView').classList.add('hidden');
+        loadSubcontractorWorkOrder(woId);
+      } else {
+        // Show PM Work Order Creator View
+        document.getElementById('pmView').classList.remove('hidden');
+        document.getElementById('subcontractorView').classList.add('hidden');
+        initPmCreator();
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // SUBCONTRACTOR VIEW LOGIC
+    // -------------------------------------------------------------------------
+
+    function loadSubcontractorWorkOrder(woId) {
+      showLoader('Fetching Work Order #' + woId + '...');
+
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(function(res) {
+            hideLoader();
+            if (res && res.success) {
+              renderWorkOrder(res.workOrder, res.lineItems);
+            } else {
+              showToast(res ? res.error : 'Work order not found', '❌');
+            }
+          })
+          .withFailureHandler(function(err) {
+            hideLoader();
+            showToast('Error: ' + err.message, '❌');
+          })
+          .getWorkOrderData(woId);
+      } else {
+        // Not inside Apps Script runtime
+        setTimeout(function() {
+          hideLoader();
+          showToast('Work order not found. Open via generated Work Order link with valid woId.', '⚠️');
+        }, 500);
+      }
+    }
+
+    function renderWorkOrder(wo, items) {
+      currentWoData = wo;
+      currentLineItems = items || [];
+
+      document.getElementById('headerWoId').textContent = wo.woId;
+      document.getElementById('headerProjectName').textContent = wo.projectName;
+      document.getElementById('headerUnit').textContent = wo.unitArea;
+      document.getElementById('subInfoName').textContent = wo.subName + (wo.subPhone ? ' (' + wo.subPhone + ')' : '');
+      document.getElementById('subInfoDate').textContent = 'Scheduled: ' + (wo.scheduledDate || 'Today');
+
+      var statusBadge = document.getElementById('woStatusBadge');
+      statusBadge.textContent = wo.status;
+      if (wo.status === 'Completed') {
+        statusBadge.className = 'inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200';
+      } else if (wo.status === 'In Progress') {
+        statusBadge.className = 'inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200';
+      } else {
+        statusBadge.className = 'inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200';
+      }
+
+      renderLineItemCards();
+      updateProgressDisplay();
+    }
+
+    function renderLineItemCards() {
+      var container = document.getElementById('lineItemsContainer');
+      container.innerHTML = '';
+
+      currentLineItems.forEach(function(item, index) {
+        var card = document.createElement('div');
+        card.id = 'card-' + item.lineId;
+        card.className = 'bg-white rounded-2xl p-4 shadow-sm border border-slate-200 transition-all duration-200';
+
+        var isDone = (item.status === 'Completed');
+        var isFlagged = (item.status === 'Flagged');
+
+        var badgeClass = isDone 
+          ? 'bg-emerald-100 text-emerald-800 border-emerald-200' 
+          : (isFlagged ? 'bg-rose-100 text-rose-800 border-rose-200' : 'bg-slate-100 text-slate-600 border-slate-200');
+        
+        var badgeText = isDone ? 'AI Verified' : (isFlagged ? 'Retake Needed' : 'Pending Photo');
+
+        var html = `
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex items-start gap-2.5">
+              <span class="w-6 h-6 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">
+                ${index + 1}
+              </span>
+              <div>
+                <p class="font-bold text-slate-900 text-sm leading-snug">${escapeHtml(item.taskDescription)}</p>
+                <span class="text-[11px] font-mono text-slate-400">${item.lineId}</span>
+              </div>
+            </div>
+            <span id="badge-${item.lineId}" class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border shrink-0 ${badgeClass}">
+              ${badgeText}
+            </span>
+          </div>
+
+          <!-- Photo Preview and Controls -->
+          <div class="mt-3.5 space-y-3">
+            ${item.photoUrl ? `
+              <div class="relative rounded-xl overflow-hidden border border-slate-200 bg-slate-50 max-h-48 flex items-center justify-center">
+                <img src="${item.photoUrl}" alt="Inspection Photo" class="w-full h-44 object-cover">
+              </div>
+            ` : ''}
+
+            <!-- Status Note -->
+            ${isDone ? `
+            <div id="statusBox-${item.lineId}" class="rounded-xl p-3 text-xs leading-relaxed border bg-emerald-50 border-emerald-200 text-emerald-900">
+              <div class="flex items-center gap-1.5 font-bold mb-1">
+                <span>✓ Photo Verified</span>
+              </div>
+              <p>Scope completed and verified on site.</p>
+            </div>
+            ` : ''}
+
+            <!-- Upload / Camera Button -->
+            <div class="flex items-center gap-2 pt-1">
+              <label class="flex-1 cursor-pointer">
+                <input type="file" accept="image/*" capture="environment" onchange="handlePhotoSelect('${item.lineId}', event)" class="hidden">
+                <div class="w-full py-2.5 px-3 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center justify-center gap-2 transition active:scale-98">
+                  <svg class="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                    <circle cx="12" cy="13" r="3" />
+                  </svg>
+                  <span>${item.photoUrl ? 'Retake Photo' : 'Take Site Photo'}</span>
+                </div>
+              </label>
+              ${item.photoUrl ? `
+                <a href="${item.photoUrl}" target="_blank" class="p-2.5 rounded-xl border border-slate-200 text-slate-500 hover:text-slate-800 hover:bg-slate-50 transition" title="View Full Photo in Drive">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                </a>
+              ` : ''}
+            </div>
+          </div>
+        `;
+
+        card.innerHTML = html;
+        container.appendChild(card);
+      });
+    }
+
+    function handlePhotoSelect(lineId, event) {
+      var file = event.target.files[0];
+      if (!file) return;
+
+      showLoader('Uploading and saving photo...');
+
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        var base64Data = e.target.result;
+        var mimeType = file.type || 'image/jpeg';
+
+        if (typeof google !== 'undefined' && google.script && google.script.run) {
+          google.script.run
+            .withSuccessHandler(function(res) {
+              hideLoader();
+              if (res && res.success) {
+                applyPhotoVerificationResult(res);
+              } else {
+                showToast('Upload failed: ' + (res ? res.error : 'Unknown error'), '❌');
+              }
+            })
+            .withFailureHandler(function(err) {
+              hideLoader();
+              showToast('Error: ' + err.message, '❌');
+            })
+            .submitLineItemPhoto(lineId, base64Data, mimeType);
+        } else {
+          // Fallback simulation outside GAS
+          setTimeout(function() {
+            hideLoader();
+            applyPhotoVerificationResult({
+              success: true,
+              lineId: lineId,
+              status: 'Completed',
+              photoUrl: base64Data,
+              completedCount: 1,
+              totalCount: currentLineItems.length
+            });
+          }, 600);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function applyPhotoVerificationResult(res) {
+      // Find item and update memory
+      for (var i = 0; i < currentLineItems.length; i++) {
+        if (currentLineItems[i].lineId === res.lineId) {
+          currentLineItems[i].status = res.status || 'Completed';
+          currentLineItems[i].photoUrl = res.photoUrl || currentLineItems[i].photoUrl;
+          break;
+        }
+      }
+
+      showToast('Photo uploaded successfully!', '✅');
+
+      renderLineItemCards();
+      updateProgressDisplay();
+    }
+
+    function updateProgressDisplay() {
+      var total = currentLineItems.length;
+      var completed = currentLineItems.filter(function(i) { return i.status === 'Completed'; }).length;
+      var percent = total === 0 ? 0 : Math.round((completed / total) * 100);
+
+      document.getElementById('headerPercent').textContent = percent + '%';
+      document.getElementById('headerRatio').textContent = completed + ' of ' + total;
+      document.getElementById('progressBar').style.width = percent + '%';
+      document.getElementById('bottomStatusText').textContent = completed + ' of ' + total + ' verified (' + percent + '%)';
+
+      var btnSignOff = document.getElementById('btnSignOff');
+      if (total > 0 && completed === total) {
+        btnSignOff.disabled = false;
+        btnSignOff.className = 'px-5 py-3 rounded-xl font-bold text-sm bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer shadow-lg shadow-emerald-600/30 transition-all flex items-center gap-2 animate-bounce';
+      } else {
+        btnSignOff.disabled = true;
+        btnSignOff.className = 'px-5 py-3 rounded-xl font-bold text-sm bg-slate-200 text-slate-400 cursor-not-allowed transition-all duration-200 flex items-center gap-2 shadow-sm';
+      }
+    }
+
+    function openSignOffModal() {
+      document.getElementById('signOffModal').classList.remove('hidden');
+      document.getElementById('signOffModal').classList.add('flex');
+    }
+
+    function closeSignOffModal() {
+      document.getElementById('signOffModal').classList.add('hidden');
+      document.getElementById('signOffModal').classList.remove('flex');
+    }
+
+    function submitWorkOrderSignOff() {
+      var signerName = document.getElementById('inputSignerName').value.trim() || 'Subcontractor Lead';
+      showLoader('Recording sign-off in Google Sheet...');
+
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(function(res) {
+            hideLoader();
+            closeSignOffModal();
+            if (res && res.success) {
+              showToast('Job marked complete & recorded in Sheet!', '🎉');
+              var statusBadge = document.getElementById('woStatusBadge');
+              statusBadge.textContent = 'Completed';
+              statusBadge.className = 'inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200';
+            } else {
+              showToast(res ? res.error : 'Sign off error', '❌');
+            }
+          })
+          .withFailureHandler(function(err) {
+            hideLoader();
+            showToast('Error: ' + err.message, '❌');
+          })
+          .completeWorkOrder(currentWoData.woId, signerName);
+      } else {
+        setTimeout(function() {
+          hideLoader();
+          closeSignOffModal();
+          showToast('Job marked complete & verified!', '🎉');
+        }, 600);
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // PM CREATOR VIEW LOGIC
+    // -------------------------------------------------------------------------
+
+    function initPmCreator() {
+      var tasksList = document.getElementById('tasksList');
+      tasksList.innerHTML = '';
+      addLineItemInput('Install OSB fire barrier between 1st and 2nd floor');
+      addLineItemInput('Fire-caulk all electrical and plumbing penetrations');
+      addLineItemInput('Install resilient hat rack channel at 16-inch OC');
+    }
+
+    function addLineItemInput(defaultVal) {
+      var tasksList = document.getElementById('tasksList');
+      var row = document.createElement('div');
+      row.className = 'flex items-center gap-2 task-row';
+      row.innerHTML = `
+        <span class="w-6 text-center text-xs font-mono font-bold text-slate-400">#</span>
+        <input type="text" value="${defaultVal ? escapeHtml(defaultVal) : ''}" placeholder="e.g. Scope requirement..." required class="task-desc-input flex-1 px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none">
+        <button type="button" onclick="this.parentElement.remove(); renumberTasks();" class="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+          </svg>
+        </button>
+      `;
+      tasksList.appendChild(row);
+      renumberTasks();
+    }
+
+    function addPresetTask(text) {
+      addLineItemInput(text);
+    }
+
+    function renumberTasks() {
+      var rows = document.querySelectorAll('.task-row');
+      rows.forEach(function(r, idx) {
+        var span = r.querySelector('span');
+        if (span) span.textContent = (idx + 1) + '.';
+      });
+    }
+
+    function handleCreateWorkOrder(e) {
+      e.preventDefault();
+
+      var project = document.getElementById('inputProject').value.trim();
+      var unit = document.getElementById('inputUnit').value.trim();
+      var subName = document.getElementById('inputSubName').value.trim();
+      var subPhone = document.getElementById('inputSubPhone').value.trim();
+      var date = document.getElementById('inputDate').value;
+
+      var inputs = document.querySelectorAll('.task-desc-input');
+      var lineItemsArray = [];
+      inputs.forEach(function(inp) {
+        var val = inp.value.trim();
+        if (val) lineItemsArray.push(val);
+      });
+
+      if (lineItemsArray.length === 0) {
+        showToast('Please add at least one line item task', '⚠️');
+        return;
+      }
+
+      showLoader('Creating Work Order in Google Sheets...');
+
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(function(res) {
+            hideLoader();
+            if (res && res.success) {
+              displayGeneratedLink(res.woId, res.magicLink);
+            } else {
+              showToast('Error: ' + (res ? res.error : 'Failed to create'), '❌');
+            }
+          })
+          .withFailureHandler(function(err) {
+            hideLoader();
+            showToast('Error: ' + err.message, '❌');
+          })
+          .createWorkOrder(project, unit, subName, subPhone, date, lineItemsArray);
+      } else {
+        // Fallback simulation
+        setTimeout(function() {
+          hideLoader();
+          var simWoId = 'WO-' + Math.floor(1000 + Math.random() * 9000);
+          var simUrl = window.location.href.split('?')[0] + '?woId=' + simWoId;
+          displayGeneratedLink(simWoId, simUrl);
+        }, 700);
+      }
+    }
+
+    function displayGeneratedLink(woId, url) {
+      document.getElementById('createdWoBadge').textContent = woId;
+      document.getElementById('generatedUrlInput').value = url;
+      document.getElementById('openDirectLink').href = url;
+      document.getElementById('generatedLinkBox').classList.remove('hidden');
+      document.getElementById('generatedLinkBox').scrollIntoView({ behavior: 'smooth' });
+      showToast('Work order created! Link ready to send.', '✅');
+    }
+
+    function copyGeneratedLink() {
+      var input = document.getElementById('generatedUrlInput');
+      input.select();
+      input.setSelectionRange(0, 99999);
+      navigator.clipboard.writeText(input.value).then(function() {
+        showToast('Link copied to clipboard!', '📋');
+      }).catch(function() {
+        document.execCommand('copy');
+        showToast('Link copied!', '📋');
+      });
+    }
+
+    // -------------------------------------------------------------------------
+    // UTILITIES & MOCK FALLBACK
+    // -------------------------------------------------------------------------
+
+    function showToast(msg, icon) {
+      var toast = document.getElementById('toast');
+      document.getElementById('toastMsg').textContent = msg;
+      document.getElementById('toastIcon').textContent = icon || 'ℹ️';
+      toast.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-[-20px]');
+      toast.classList.add('opacity-100', 'translate-y-0');
+      setTimeout(function() {
+        toast.classList.add('opacity-0', 'pointer-events-none', 'translate-y-[-20px]');
+        toast.classList.remove('opacity-100', 'translate-y-0');
+      }, 3500);
+    }
+
+    function showLoader(text) {
+      document.getElementById('loaderText').textContent = text || 'Processing...';
+      document.getElementById('globalLoader').classList.remove('hidden');
+    }
+
+    function hideLoader() {
+      document.getElementById('globalLoader').classList.add('hidden');
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+  </script>
+</body>
+</html>

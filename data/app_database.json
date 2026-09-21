@@ -1,0 +1,104 @@
+{
+  "version": 2,
+  "savedAt": "2026-09-21T11:47:39.675Z",
+  "customAppsScriptUrl": "https://script.google.com/macros/s/AKfycbyEtLFk6mTeOHbYQZrR4ct-g00gmA8yRJSuM4mnTGq-dt7asGtn4yNtEpI4yoU-9NlryA/exec",
+  "users": {
+    "usr_pm_default": {
+      "id": "usr_pm_default",
+      "email": "pm@haysandsons.com",
+      "name": "Ryan Russell",
+      "role": "pm",
+      "company": "Hays + Sons Restoration",
+      "trade": "General Restoration & Project Management",
+      "phone": "(260) 210-0415",
+      "assignedWoIds": [],
+      "permissions": [
+        "create_work_order",
+        "view_all_work_orders",
+        "edit_work_order",
+        "delete_work_order",
+        "view_analytics"
+      ],
+      "salt": "salt_pm_default",
+      "passwordHash": "59d52a37aecdde47e740d93ae0f6bff10ebadc83e2cd9607ab025e7965320a080d59781db240357b1b3be40b638f198ef2d1da3a264fe6ffdafa07dd042cf7f8",
+      "tempPassword": "Password123!",
+      "createdAt": "2026-09-21T11:47:30.840Z"
+    },
+    "usr_sub_default": {
+      "id": "usr_sub_default",
+      "email": "sub@contractor.com",
+      "name": "Dave Miller",
+      "role": "subcontractor",
+      "company": "Apex Drywall & Finishing",
+      "trade": "Drywall, Finishing & Painting",
+      "phone": "(260) 555-0199",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_photos",
+        "sign_off_work_order"
+      ],
+      "salt": "salt_sub_default",
+      "passwordHash": "1570f3d4fc1886bb1f10814011889cc687961e0f7582c7a98f182e75c23d2f1bc586f2b8b7c88a70f4f40ce401fad42a5d5efcbb5723b9911b3cbd1b7c9de001",
+      "tempPassword": "Password123!",
+      "createdAt": "2026-09-21T11:47:30.841Z"
+    },
+    "usr_pm_1789991257939": {
+      "id": "usr_pm_1789991257939",
+      "email": "spservicesgroupinc@gmail.com",
+      "name": "SP Services PM",
+      "role": "pm",
+      "company": "SP Services Group",
+      "trade": "General Restoration & Project Management",
+      "phone": "",
+      "assignedWoIds": [],
+      "permissions": [
+        "create_work_order",
+        "view_all_work_orders",
+        "edit_work_order",
+        "delete_work_order",
+        "view_analytics"
+      ],
+      "salt": "c220a3b2c209237d92c9e585f09d94be",
+      "passwordHash": "627278d180aab73b15d55e79cd7efe2261f2ba276dad10eadbe343ba172a02bd40ddd4eae42e1750a202443339abe2f27f24ae679993895eb094ff0e00312089",
+      "tempPassword": "Password123!",
+      "password": "Password123!",
+      "createdAt": "2026-09-21T11:47:37.939Z"
+    },
+    "usr_subcontractor_1789991259675": {
+      "id": "usr_subcontractor_1789991259675",
+      "email": "alex@subcontractor.com",
+      "name": "Alex Subcontractor",
+      "role": "subcontractor",
+      "company": "Alex Drywall & Paint",
+      "trade": "Trade Subcontractor",
+      "phone": "555-987-6543",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "c50d5ea1e1866f7448f8ce62a788f0e5",
+      "passwordHash": "1cead4a59dc91fe4fc4dbe1ee8c89051c0828f92bd2ce26a56ee5bc0b58d09081ca54a7b5cc796568eda87d5902a10929b0774fc2a99028964645bc9fa74b5e1",
+      "tempPassword": "SubPassword456!",
+      "password": "SubPassword456!",
+      "createdAt": "2026-09-21T11:47:39.675Z"
+    }
+  },
+  "workOrders": {},
+  "lineItems": {},
+  "jobs": {},
+  "activityLogs": [
+    {
+      "id": "act_1789991257953",
+      "timestamp": "11:47 AM",
+      "type": "pm_created",
+      "subId": "usr_pm_1789991257939",
+      "subName": "SP Services PM",
+      "company": "SP Services Group",
+      "taskDescription": "Project Manager account created: SP Services PM",
+      "notes": "Registered via portal"
+    }
+  ]
+}
