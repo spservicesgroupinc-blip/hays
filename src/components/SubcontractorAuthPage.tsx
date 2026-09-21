@@ -214,7 +214,21 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
             {errorMessage && (
               <div className="mb-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-300 text-xs flex items-start gap-2 animate-in fade-in">
                 <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
-                <div className="flex-1 font-medium">{errorMessage}</div>
+                <div className="flex-1 font-medium">
+                  {errorMessage}
+                  {mode === 'register' && errorMessage.toLowerCase().includes('already exists') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMode('login');
+                        setErrorMessage(null);
+                      }}
+                      className="mt-1.5 block text-white font-bold underline hover:text-rose-200 transition"
+                    >
+                      Switch to Sign In with this email →
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 

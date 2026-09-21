@@ -39,6 +39,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
+  // If Vercel already consumed and parsed req.body, mark _body to prevent body-parser stream errors
+  if (req.body !== undefined && req.body !== null) {
+    if (typeof req.body === 'string' && req.headers['content-type']?.includes('application/json')) {
+      try {
+        req.body = JSON.parse(req.body);
+      } catch {
+        // Keep string if not valid JSON
+      }
+    }
+    (req as any)._body = true;
+  }
+
   normalizeVercelUrl(req);
 
   return new Promise((resolve) => {
@@ -67,6 +79,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
               error: err?.message || 'Internal Server Error'
             });
           }
+        } else if (!res.headersSent) {
+          res.status(404).json({
+            success: false,
+            error: `API route not found: ${req.method} ${req.url}`
+          });
         }
         finishHandler();
       });

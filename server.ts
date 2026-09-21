@@ -23,6 +23,21 @@ function getGenAI(): GoogleGenAI {
   return aiClient;
 }
 
+// Handle serverless pre-parsed bodies (e.g. Vercel @vercel/node) so body-parser does not crash on consumed stream
+app.use((req, _res, next) => {
+  if (req.body !== undefined && req.body !== null) {
+    if (typeof req.body === 'string' && req.headers['content-type']?.includes('application/json')) {
+      try {
+        req.body = JSON.parse(req.body);
+      } catch {
+        // Leave as string if not valid JSON
+      }
+    }
+    (req as any)._body = true;
+  }
+  next();
+});
+
 // Body parser for base64 camera image uploads and PDF estimate files
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -390,7 +405,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
         for (const sub of data.subcontractors) {
           if (!sub.email) continue;
           const cleanEmail = String(sub.email).trim().toLowerCase();
-          const existing = Object.values(usersDb).find(u => u.email.toLowerCase() === cleanEmail);
+          const existing = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
           const subPass = String(sub.password || '').trim();
           
           if (!existing) {
@@ -434,7 +449,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
         for (const pm of data.projectManagers) {
           if (!pm.email) continue;
           const cleanEmail = String(pm.email).trim().toLowerCase();
-          const existing = Object.values(usersDb).find(u => u.email.toLowerCase() === cleanEmail);
+          const existing = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
           const pmPass = String(pm.password || '').trim();
           
           if (!existing) {
@@ -648,8 +663,8 @@ app.post('/api/auth/register-pm', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Full Name, Email Address, and Password are required.' });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
-    const existing = Object.values(usersDb).find(u => u.email.toLowerCase() === cleanEmail);
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const existing = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
     if (existing) {
       return res.status(409).json({ success: false, error: `An account with email ${cleanEmail} already exists. Please sign in instead.` });
     }
@@ -737,7 +752,7 @@ app.post('/api/auth/login', async (req, res) => {
     const cleanEmail = String(email).toLowerCase().trim();
     const trimmedPass = String(password).trim();
 
-    let user = Object.values(usersDb).find(u => u.email.toLowerCase() === cleanEmail);
+    let user = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
 
     // Friendly aliases for easy login
     if (!user && (cleanEmail === 'pm@haysandsons.com' || cleanEmail === 'pm')) {
@@ -824,109 +839,145 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // 3. Authentication: Register
-app.post('/api/auth/register', (req, res) => {
-  const { email, password, name, role, company, phone, trade } = req.body;
-  if (!email || !password || !name || !role) {
-    return res.status(400).json({ success: false, error: 'Email, password, name, and role are required.' });
-  }
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    ensureSeedUsers();
 
-  if (role !== 'pm' && role !== 'subcontractor') {
-    return res.status(400).json({ success: false, error: 'Role must be either pm or subcontractor.' });
-  }
+    let body = req.body || {};
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        return res.status(400).json({ success: false, error: 'Invalid JSON request payload.' });
+      }
+    }
 
-  const cleanEmail = email.toLowerCase().trim();
-  const existing = Object.values(usersDb).find(u => u.email.toLowerCase() === cleanEmail);
-  if (existing) {
-    return res.status(400).json({ success: false, error: 'An account with this email address already exists.' });
-  }
+    const { email, password, name, role, company, phone, trade } = body;
+    const cleanEmail = String(email || '').toLowerCase().trim();
+    const strPass = String(password || '').trim();
+    const strName = String(name || '').trim();
+    const targetRole = String(role || '').trim().toLowerCase();
 
-  const salt = crypto.randomBytes(16).toString('hex');
-  const passwordHash = hashPassword(password, salt);
-  const id = `usr_${role}_${Date.now()}`;
+    if (!cleanEmail || !strPass || !strName || !targetRole) {
+      return res.status(400).json({ success: false, error: 'Full name, email address, password, and role are required.' });
+    }
 
-  const permissions = role === 'pm'
-    ? ['create_work_order', 'view_all_work_orders', 'edit_work_order', 'delete_work_order', 'view_analytics']
-    : ['view_assigned_work_orders', 'upload_inspection_photo', 'sign_off_work_order'];
+    if (targetRole !== 'pm' && targetRole !== 'subcontractor') {
+      return res.status(400).json({ success: false, error: 'Role must be either "pm" or "subcontractor".' });
+    }
 
-  const resolvedTrade = trade ? trade.trim() : (role === 'pm' ? 'General Restoration & Project Management' : 'Trade Subcontractor');
+    if (strPass.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters long.' });
+    }
 
-  const newUser: UserRecord = {
-    id,
-    email: cleanEmail,
-    name: name.trim(),
-    role,
-    company: company ? company.trim() : (role === 'pm' ? 'Hays + Sons Restoration' : 'Trade Partner'),
-    trade: resolvedTrade,
-    phone: phone ? phone.trim() : '',
-    assignedWoIds: [],
-    permissions,
-    salt,
-    passwordHash,
-    tempPassword: password,
-    password,
-    createdAt: new Date().toISOString()
-  };
+    const existing = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
+    if (existing) {
+      return res.status(400).json({ success: false, error: 'An account with this email address already exists. Please sign in instead.' });
+    }
 
-  usersDb[id] = newUser;
-  saveDatabaseState();
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = hashPassword(strPass, salt);
+    const id = `usr_${targetRole}_${Date.now()}`;
 
-  if (role === 'subcontractor') {
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    activityLogsDb.unshift({
-      id: `act_${Date.now()}`,
-      timestamp: nowTime,
-      type: 'sub_created',
-      subId: id,
-      subName: newUser.name,
-      company: newUser.company,
-      taskDescription: `Subcontractor account created (${resolvedTrade})`,
-      notes: `Registered via portal`
+    const permissions = targetRole === 'pm'
+      ? ['create_work_order', 'view_all_work_orders', 'edit_work_order', 'delete_work_order', 'view_analytics']
+      : ['view_assigned_work_orders', 'upload_inspection_photo', 'sign_off_work_order'];
+
+    const resolvedTrade = trade && typeof trade === 'string' && trade.trim() 
+      ? trade.trim() 
+      : (targetRole === 'pm' ? 'General Restoration & Project Management' : 'Trade Subcontractor');
+
+    const newUser: UserRecord = {
+      id,
+      email: cleanEmail,
+      name: strName,
+      role: targetRole as 'pm' | 'subcontractor',
+      company: company && typeof company === 'string' && company.trim() 
+        ? company.trim() 
+        : (targetRole === 'pm' ? 'Hays + Sons Restoration' : 'Trade Partner'),
+      trade: resolvedTrade,
+      phone: phone && typeof phone === 'string' ? phone.trim() : '',
+      assignedWoIds: [],
+      permissions,
+      salt,
+      passwordHash,
+      tempPassword: strPass,
+      password: strPass,
+      createdAt: new Date().toISOString()
+    };
+
+    usersDb[id] = newUser;
+    saveDatabaseState();
+
+    let nowTime = '';
+    try {
+      nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      nowTime = new Date().toISOString().substring(11, 16);
+    }
+
+    if (targetRole === 'subcontractor') {
+      activityLogsDb.unshift({
+        id: `act_${Date.now()}`,
+        timestamp: nowTime,
+        type: 'sub_created',
+        subId: id,
+        subName: newUser.name,
+        company: newUser.company,
+        taskDescription: `Subcontractor account created (${resolvedTrade})`,
+        notes: `Registered via portal`
+      });
+
+      // Synchronize new subcontractor directly to Google Sheet with password in background
+      callAppsScript('registerSubcontractor', {
+        company: newUser.company,
+        name: newUser.name,
+        trade: newUser.trade,
+        email: newUser.email,
+        phone: newUser.phone,
+        password: strPass
+      }).catch(e => console.warn('Cloud sheet registration sync notice:', e?.message));
+    } else if (targetRole === 'pm') {
+      activityLogsDb.unshift({
+        id: `act_${Date.now()}`,
+        timestamp: nowTime,
+        type: 'pm_created',
+        subId: id,
+        subName: newUser.name,
+        company: newUser.company,
+        taskDescription: `Project Manager account created: ${newUser.name}`,
+        notes: `Registered via portal`
+      });
+
+      // Synchronize new PM directly to Google Sheet with password in background
+      callAppsScript('registerPM', {
+        name: newUser.name,
+        email: newUser.email,
+        company: newUser.company,
+        phone: newUser.phone,
+        password: strPass
+      }).catch(e => console.warn('Cloud sheet PM registration sync notice:', e?.message));
+    }
+
+    const token = generateSecureToken();
+    sessionsDb[token] = {
+      token,
+      userId: id,
+      expiresAt: Date.now() + SEVEN_DAYS_MS
+    };
+
+    return res.status(201).json({
+      success: true,
+      token,
+      user: getSafeUser(newUser, token)
     });
-
-    // Synchronize new subcontractor directly to Google Sheet with password
-    callAppsScript('registerSubcontractor', {
-      company: newUser.company,
-      name: newUser.name,
-      trade: newUser.trade,
-      email: newUser.email,
-      phone: newUser.phone,
-      password
-    }).catch(e => console.error('Cloud sheet registration sync notice:', e.message));
-  } else if (role === 'pm') {
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    activityLogsDb.unshift({
-      id: `act_${Date.now()}`,
-      timestamp: nowTime,
-      type: 'pm_created',
-      subId: id,
-      subName: newUser.name,
-      company: newUser.company,
-      taskDescription: `Project Manager account created: ${newUser.name}`,
-      notes: `Registered via portal`
+  } catch (err: any) {
+    console.error('Registration error:', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'An unexpected error occurred while creating your account.'
     });
-
-    // Synchronize new PM directly to Google Sheet with password
-    callAppsScript('registerPM', {
-      name: newUser.name,
-      email: newUser.email,
-      company: newUser.company,
-      phone: newUser.phone,
-      password
-    }).catch(e => console.error('Cloud sheet PM registration sync notice:', e.message));
   }
-
-  const token = generateSecureToken();
-  sessionsDb[token] = {
-    token,
-    userId: id,
-    expiresAt: Date.now() + SEVEN_DAYS_MS
-  };
-
-  res.json({
-    success: true,
-    token,
-    user: getSafeUser(newUser, token)
-  });
 });
 
 // 4. Authentication: Current Profile
@@ -1181,7 +1232,8 @@ app.post('/api/pm/subcontractors', (req, res) => {
     }
 
     // Check if email already exists
-    const existing = Object.values(usersDb).find(u => u.email.toLowerCase() === email.toLowerCase());
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const existing = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
     if (existing) {
       return res.status(409).json({ success: false, error: `Subcontractor with email ${email} already exists.` });
     }

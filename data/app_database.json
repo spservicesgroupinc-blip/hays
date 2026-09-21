@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "savedAt": "2026-09-21T16:28:07.064Z",
+  "savedAt": "2026-09-21T17:03:37.805Z",
   "customAppsScriptUrl": "https://script.google.com/macros/s/AKfycbyEtLFk6mTeOHbYQZrR4ct-g00gmA8yRJSuM4mnTGq-dt7asGtn4yNtEpI4yoU-9NlryA/exec",
   "users": {
     "usr_pm_default": {
@@ -166,12 +166,82 @@
       "tempPassword": "Password123!",
       "password": "Password123!",
       "createdAt": "2026-09-21T12:19:50.625Z"
+    },
+    "usr_subcontractor_1790009866260": {
+      "id": "usr_subcontractor_1790009866260",
+      "email": "test12345@example.com",
+      "name": "Test User",
+      "role": "subcontractor",
+      "company": "Test Co",
+      "trade": "Trade Subcontractor",
+      "phone": "555-1234",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "salt_sub_1790010212251",
+      "passwordHash": "8873e19a6aae9107f9c2a923b8177cb7784e0ba9590e8bc154832a442cdcb08ccabcf2ec5298bf8b8ae1ee2a35b85b74be794a48fb45954cbe34194d8bfde326",
+      "tempPassword": "password123",
+      "password": "password123",
+      "createdAt": "2026-09-21T16:57:46.260Z"
+    },
+    "usr_subcontractor_1790009974455": {
+      "id": "usr_subcontractor_1790009974455",
+      "email": "brandnewuser@example.com",
+      "name": "New Sub",
+      "role": "subcontractor",
+      "company": "Trade Partner",
+      "trade": "Trade Subcontractor",
+      "phone": "",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "salt_sub_1790010212252",
+      "passwordHash": "b783c449bc03c04d7a340427f4e4d58882cb3d861b82ddbd1b2611cb4c8e1cc475dbb086fa9a14b3bf453f40dff070d8d25e10ca2514e165ae0a8a6aa8e69c10",
+      "tempPassword": "password123",
+      "password": "password123",
+      "createdAt": "2026-09-21T16:59:34.455Z"
+    },
+    "usr_subcontractor_1790010217805": {
+      "id": "usr_subcontractor_1790010217805",
+      "email": "verifiedsub@contractor.com",
+      "name": "Verified Sub",
+      "role": "subcontractor",
+      "company": "Trade Partner",
+      "trade": "Trade Subcontractor",
+      "phone": "",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "f58f7f398e511e226685b77067878d6b",
+      "passwordHash": "cae03890f10f836370c75cc0a1e48345a4c942d647518c5c8cf25b5396bbccc597c1d276cae431f2d026bf399f96a6ce4c8220cc831116d45705f294a958b2a4",
+      "tempPassword": "Password123!",
+      "password": "Password123!",
+      "createdAt": "2026-09-21T17:03:37.805Z"
     }
   },
   "workOrders": {},
   "lineItems": {},
   "jobs": {},
   "activityLogs": [
+    {
+      "id": "act_1790009866280",
+      "timestamp": "04:57 PM",
+      "type": "sub_created",
+      "subId": "usr_subcontractor_1790009866260",
+      "subName": "Test User",
+      "company": "Test Co",
+      "taskDescription": "Subcontractor account created (Trade Subcontractor)",
+      "notes": "Registered via portal"
+    },
     {
       "id": "act_1789991259675",
       "timestamp": "11:47 AM",
