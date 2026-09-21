@@ -6,6 +6,12 @@ import { GoogleGenAI, Type } from '@google/genai';
 
 const app = express();
 const PORT = 3000;
+const isServerlessRuntime = Boolean(
+  process.env.VERCEL ||
+  process.env.VERCEL_ENV ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.LAMBDA_TASK_ROOT
+);
 
 // Lazy initialize Gemini client (strictly server-side)
 let aiClient: GoogleGenAI | null = null;
@@ -390,7 +396,7 @@ const lineItemsDb: Record<string, LineItem[]> = {};
 // PERSISTENT DISK STORAGE & CACHING
 // ----------------------------------------------------------------------------
 function getWritableDataDir(): string {
-  if (process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT) {
+  if (isServerlessRuntime) {
     return path.join('/tmp', 'data');
   }
   const localDir = path.join(process.cwd(), 'data');
@@ -657,7 +663,7 @@ loadDatabaseState();
 ensureSeedUsers();
 
 // 3. Sync from Google Sheets in background (only in persistent servers, never unhandled in serverless init)
-if (!process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+if (!isServerlessRuntime) {
   syncFromGoogleSheets().catch(err => {
     console.warn('Initial background sync notice:', err?.message);
   });
@@ -2527,7 +2533,7 @@ const isDirectExecution = Boolean(
 
 // In local and container environments, boot the server immediately when run directly.
 // When imported by serverless handlers (Vercel / Cloud Functions), the Express instance is exported.
-if (isDirectExecution && !process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.AWS_LAMBDA_FUNCTION_NAME && process.env.NODE_ENV !== 'test') {
+if (isDirectExecution && !isServerlessRuntime && process.env.NODE_ENV !== 'test') {
   startServer();
 }
 

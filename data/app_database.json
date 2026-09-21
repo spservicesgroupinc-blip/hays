@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "savedAt": "2026-09-21T17:51:51.225Z",
+  "savedAt": "2026-09-21T18:29:12.571Z",
   "customAppsScriptUrl": "https://script.google.com/macros/s/AKfycbyEtLFk6mTeOHbYQZrR4ct-g00gmA8yRJSuM4mnTGq-dt7asGtn4yNtEpI4yoU-9NlryA/exec",
   "users": {
     "usr_pm_default": {
@@ -328,6 +328,26 @@
       "tempPassword": "Password123!",
       "password": "Password123!",
       "createdAt": "2026-09-21T17:51:46.896Z"
+    },
+    "SUB-9166": {
+      "id": "SUB-9166",
+      "email": "f@f.com",
+      "name": "TE",
+      "role": "subcontractor",
+      "company": "F",
+      "trade": "Trade Subcontractor",
+      "phone": "",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "salt_sub_1790015352568",
+      "passwordHash": "5e0316c95adae4fd69d0e191b828cd1ef6d55fb9cd4f826c223e8cb42e9972fe72fa5bd663ddc2d70a473f52d744821dbcacc66082af5598f925203153a8078c",
+      "tempPassword": "RJAMES98",
+      "password": "RJAMES98",
+      "createdAt": "2026-09-21T18:29:12.569Z"
     }
   },
   "workOrders": {},
