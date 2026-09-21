@@ -53,20 +53,63 @@ app.use((req, res, next) => {
   next();
 });
 
-// URL normalization for serverless environments (handles stripped /api prefixes)
-app.use((req, res, next) => {
-  if (!req.url.startsWith('/api') && (
-    req.url.startsWith('/auth') || 
-    req.url.startsWith('/work-orders') || 
-    req.url.startsWith('/jobs') || 
-    req.url.startsWith('/subcontractors') || 
-    req.url.startsWith('/health') || 
-    req.url.startsWith('/cloud-sync') || 
-    req.url.startsWith('/ai') || 
-    req.url.startsWith('/verify-photo') || 
-    req.url.startsWith('/pm')
-  )) {
+// URL normalization for serverless environments (handles Vercel rewrites & stripped /api prefixes)
+export function normalizeVercelUrl(req: any): void {
+  const initialUrl = req.url || '';
+  const initialPath = initialUrl.split('?')[0];
+
+  // 1. If req.url is already a concrete sub-path (e.g. /api/auth/register or /auth/register)
+  if (initialPath && initialPath !== '/' && initialPath !== '/api' && initialPath !== '/api/') {
+    const stripped = initialPath.replace(/^\/api\/?/, '/');
+    const queryString = initialUrl.includes('?') ? '?' + initialUrl.split('?')[1] : '';
+    req.url = `/api${stripped}${queryString}`;
+    return;
+  }
+
+  // 2. Check for query path from vercel.json rewrite (e.g. ?path=auth/register) or catch-all ([...all].ts)
+  const queryPath = (req.query?.path || req.query?.all || req.query?.route);
+  if (queryPath) {
+    const rawSubpath = Array.isArray(queryPath) ? queryPath.join('/') : String(queryPath);
+    const cleanSubpath = rawSubpath.replace(/^\/+/, '').replace(/^api\/?/, '');
+
+    if (cleanSubpath) {
+      const originalQueryString = initialUrl.includes('?') ? initialUrl.split('?')[1] : '';
+      const searchParams = new URLSearchParams(originalQueryString);
+      searchParams.delete('path');
+      searchParams.delete('all');
+      searchParams.delete('route');
+      const remainingQuery = searchParams.toString();
+
+      req.url = `/api/${cleanSubpath}${remainingQuery ? `?${remainingQuery}` : ''}`;
+      return;
+    }
+  }
+
+  // 3. Check proxy headers (x-forwarded-uri, x-original-url, x-rewrite-url)
+  const proxyHeader = (req.headers?.['x-forwarded-uri'] || req.headers?.['x-original-url'] || req.headers?.['x-rewrite-url']);
+  if (proxyHeader && typeof proxyHeader === 'string') {
+    const headerPath = proxyHeader.split('?')[0];
+    if (headerPath !== '/' && headerPath !== '/api' && headerPath !== '/api/') {
+      const stripped = headerPath.replace(/^\/api\/?/, '/');
+      const queryString = proxyHeader.includes('?') ? '?' + proxyHeader.split('?')[1] : '';
+      req.url = `/api${stripped}${queryString}`;
+      return;
+    }
+  }
+
+  // 4. Default: ensure valid root /api route
+  if (!req.url || req.url === '/' || req.url === '') {
+    req.url = '/api';
+  } else if (!req.url.startsWith('/api')) {
     req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
+  }
+}
+
+app.use((req, _res, next) => {
+  try {
+    normalizeVercelUrl(req);
+  } catch (e) {
+    console.warn('URL normalization notice:', e);
   }
   next();
 });
@@ -613,8 +656,12 @@ loadDatabaseState();
 // 2. Hydrate seed demo accounts if not already stored
 ensureSeedUsers();
 
-// 3. Sync from Google Sheets in background
-syncFromGoogleSheets();
+// 3. Sync from Google Sheets in background (only in persistent servers, never unhandled in serverless init)
+if (!process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  syncFromGoogleSheets().catch(err => {
+    console.warn('Initial background sync notice:', err?.message);
+  });
+}
 
 // ----------------------------------------------------------------------------
 // API ROUTES

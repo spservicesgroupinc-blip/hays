@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "savedAt": "2026-09-21T17:40:14.592Z",
+  "savedAt": "2026-09-21T17:51:51.225Z",
   "customAppsScriptUrl": "https://script.google.com/macros/s/AKfycbyEtLFk6mTeOHbYQZrR4ct-g00gmA8yRJSuM4mnTGq-dt7asGtn4yNtEpI4yoU-9NlryA/exec",
   "users": {
     "usr_pm_default": {
@@ -283,8 +283,8 @@
         "delete_work_order",
         "view_analytics"
       ],
-      "salt": "salt_pm_1790012414591",
-      "passwordHash": "f6a9e9d4ffd31eec183d1c263805563fe904b5fbd846957e5c4ab7f9b9c67dd47f5c0c455f2857a5ffee185d19d7ff815e9416e795af10c4217585ad5723df11",
+      "salt": "salt_pm_1790013111225",
+      "passwordHash": "cb6a612f20d95d255f7f5d19d32ea3831cac57851d6a9d2a0d803bb9c761d5cade626237559fd1b5bbc7ed7ec8fe9aaf72af922da127177f48bfc3f68fb78015",
       "tempPassword": "rjames98",
       "password": "rjames98",
       "createdAt": "2026-09-21T17:34:05.240Z"
@@ -308,12 +308,42 @@
       "tempPassword": "Password123!",
       "password": "Password123!",
       "createdAt": "2026-09-21T17:40:10.034Z"
+    },
+    "usr_subcontractor_1790013106896": {
+      "id": "usr_subcontractor_1790013106896",
+      "email": "alex_test_1790013106893@fieldproof.com",
+      "name": "Alex Mason",
+      "role": "subcontractor",
+      "company": "Mason Electric Co",
+      "trade": "Trade Subcontractor",
+      "phone": "(555) 777-8899",
+      "assignedWoIds": [],
+      "permissions": [
+        "view_assigned_work_orders",
+        "upload_inspection_photo",
+        "sign_off_work_order"
+      ],
+      "salt": "d052e7528391b64742d2b0251ea99acf",
+      "passwordHash": "fa61157c5c05f358eb8c71e058f7282d8f81839e8f2fd47945e49a86d23b8a5469796e211c18fa41e1c2e6b284231fcb2e2c0c4cc4c12df30a167581058fd685",
+      "tempPassword": "Password123!",
+      "password": "Password123!",
+      "createdAt": "2026-09-21T17:51:46.896Z"
     }
   },
   "workOrders": {},
   "lineItems": {},
   "jobs": {},
   "activityLogs": [
+    {
+      "id": "act_1790013106912",
+      "timestamp": "05:51 PM",
+      "type": "sub_created",
+      "subId": "usr_subcontractor_1790013106896",
+      "subName": "Alex Mason",
+      "company": "Mason Electric Co",
+      "taskDescription": "Subcontractor account created (Trade Subcontractor)",
+      "notes": "Registered via portal"
+    },
     {
       "id": "act_1790012410053",
       "timestamp": "05:40 PM",
