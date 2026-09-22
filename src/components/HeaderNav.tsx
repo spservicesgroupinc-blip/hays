@@ -16,7 +16,7 @@ import { WorkOrder, User } from '../types';
 import { HaysLogo } from './HaysLogo';
 import { PWAInstallButton } from './PWAInstallButton';
 
-export type AppTab = 'pm_hub' | 'pm_creator' | 'pm_manual' | 'subcontractor';
+export type AppTab = 'pm_hub' | 'pm_creator' | 'pm_manual' | 'subcontractor' | 'my_jobs';
 
 interface HeaderNavProps {
   currentTab: AppTab;
@@ -63,24 +63,18 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
 
           {/* Desktop Navigation Tabs (Hidden on mobile phones, shown on md+) */}
           <nav className="hidden md:flex items-center bg-slate-900 p-1 rounded-xl border border-slate-800 text-xs font-semibold shadow-inner">
-            {/* PM JOBS & ORDERS */}
+            {/* PM JOBS HUB OR SUBCONTRACTOR'S ASSIGNED JOBS PAGE */}
             <button
               id="nav-pm-hub"
-              onClick={() => {
-                if (isSubcontractor) {
-                  onOpenAuthModal();
-                } else {
-                  setTab('pm_hub');
-                }
-              }}
+              onClick={() => setTab(isSubcontractor ? 'my_jobs' : 'pm_hub')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                currentTab === 'pm_hub'
+                currentTab === (isSubcontractor ? 'my_jobs' : 'pm_hub')
                   ? 'bg-[#C81D25] text-white shadow-md font-bold'
                   : 'text-slate-300 hover:text-white hover:bg-slate-800'
               }`}
             >
               <ClipboardList className="w-3.5 h-3.5" />
-              <span>Jobs & Orders</span>
+              <span>{isSubcontractor ? 'My Jobs & Work Orders' : 'Jobs & Orders'}</span>
             </button>
 
             {/* SUBCONTRACTOR VIEW */}
@@ -211,23 +205,18 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
           <span className="text-[10px] leading-none">Subcontractor</span>
         </button>
 
-        {/* Tab 2: PM Dashboard (If PM) or Switch to PM */}
+        {/* Tab 2: My assigned jobs (subcontractor) or PM Jobs Dashboard */}
         <button
-          onClick={() => {
-            if (isSubcontractor) {
-              onOpenAuthModal();
-            } else {
-              setTab('pm_hub');
-            }
-          }}
+          id="mobile-nav-jobs"
+          onClick={() => setTab(isSubcontractor ? 'my_jobs' : 'pm_hub')}
           className={`flex flex-col items-center justify-center py-1 px-2 rounded-xl transition min-h-[44px] flex-1 ${
-            currentTab === 'pm_hub'
+            currentTab === (isSubcontractor ? 'my_jobs' : 'pm_hub')
               ? 'text-[#C81D25] font-bold'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
           <ClipboardList className="w-5 h-5 mb-0.5" />
-          <span className="text-[10px] leading-none">Jobs</span>
+          <span className="text-[10px] leading-none">{isSubcontractor ? 'My Jobs' : 'Jobs'}</span>
         </button>
 
         {/* Tab 3: Upload Estimate (PM only) */}

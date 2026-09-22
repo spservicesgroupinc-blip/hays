@@ -36,6 +36,13 @@ interface SubcontractorPortalProps {
   onOpenAuthModal: () => void;
   onLogout?: () => void;
   isMobileDeviceFrame?: boolean;
+  /**
+   * When true the portal renders the assigned jobs list as a standalone page
+   * instead of jumping straight into a work order checklist.
+   */
+  showJobListOnly?: boolean;
+  /** Opens a work order from the assigned jobs list page. */
+  onOpenJobFromList?: (woId: string) => void;
 }
 
 export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
@@ -50,16 +57,19 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
   verifyingLineId,
   accessDeniedError,
   onOpenAuthModal,
-  onLogout
+  onLogout,
+  showJobListOnly = false,
+  onOpenJobFromList
 }) => {
   // If user is currently inspecting a specific work order, they can toggle back to view their job list
   const [activeWoId, setActiveWoId] = useState<string | null>(selectedWo?.woId || null);
 
   useEffect(() => {
-    if (selectedWo?.woId) {
+    // Returning from the standalone jobs page opens the work order the crew tapped
+    if (!showJobListOnly && selectedWo?.woId) {
       setActiveWoId(selectedWo.woId);
     }
-  }, [selectedWo?.woId]);
+  }, [showJobListOnly, selectedWo?.woId]);
 
   const isSubcontractor = currentUser?.role === 'subcontractor';
 
@@ -74,6 +84,12 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
   });
 
   const handleOpenJob = (woId: string) => {
+    // On the standalone jobs page the inspection screen is a separate view,
+    // so hand the navigation back to the app shell.
+    if (showJobListOnly) {
+      onOpenJobFromList?.(woId);
+      return;
+    }
     setActiveWoId(woId);
     onSelectWo(woId);
   };
@@ -135,7 +151,7 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
       <PWAInstallButton variant="banner" />
 
       {/* 2. IF A WORK ORDER IS SELECTED: RENDER THE LINE-ITEM INSPECTION CHECKLIST */}
-      {activeWoId && selectedWo ? (
+      {!showJobListOnly && activeWoId && selectedWo ? (
         <div className="space-y-3">
           {/* Breadcrumb back to all jobs */}
           <div className="flex items-center justify-between">
@@ -169,6 +185,13 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
       ) : (
         /* 3. OTHERWISE: RENDER THE SUBCONTRACTOR'S JOBS PAGE */
         <div className="space-y-3">
+          {accessDeniedError && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-[11px] text-red-700 font-medium flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+              <span className="flex-1 leading-relaxed">{accessDeniedError}</span>
+            </div>
+          )}
+
           <div className="flex items-center justify-between px-1">
             <h2 className="text-xs font-black text-slate-800 uppercase tracking-wider">
               Assigned Work Orders ({myAssignedJobs.length})

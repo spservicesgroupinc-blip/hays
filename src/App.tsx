@@ -141,6 +141,20 @@ export default function App() {
     loadWorkOrderDetails(woId, authToken);
   };
 
+  // Navigating to the subcontractor's assigned jobs page always refreshes their dispatches
+  const handleSetTab = (tab: AppTab) => {
+    setCurrentTab(tab);
+    if (tab === 'my_jobs') {
+      loadWorkOrdersList(authToken);
+    }
+  };
+
+  // Open a work order checklist from the assigned jobs list page
+  const handleOpenJobFromJobsPage = (woId: string) => {
+    handleSelectWorkOrder(woId);
+    setCurrentTab('subcontractor');
+  };
+
   const handleLoginSuccess = (user: User, token: string) => {
     setCurrentUser(user);
     setAuthToken(token);
@@ -344,7 +358,7 @@ export default function App() {
       {/* Global Navigation Header */}
       <HeaderNav
         currentTab={currentTab}
-        setTab={setCurrentTab}
+        setTab={handleSetTab}
         isMobileDeviceFrame={isMobileDeviceFrame}
         setIsMobileDeviceFrame={setIsMobileDeviceFrame}
         workOrders={workOrders}
@@ -377,14 +391,16 @@ export default function App() {
           />
         )}
 
-        {/* VIEW 2: SUBCONTRACTOR FIELD PORTAL */}
-        {currentTab === 'subcontractor' && (
+        {/* VIEW 2: SUBCONTRACTOR FIELD PORTAL OR ASSIGNED JOBS / WORK ORDERS PAGE */}
+        {(currentTab === 'subcontractor' || currentTab === 'my_jobs') && (
           <SubcontractorPortal
             currentUser={currentUser}
             workOrders={workOrders}
             selectedWo={currentWorkOrder}
             lineItems={lineItems}
             onSelectWo={handleSelectWorkOrder}
+            showJobListOnly={currentTab === 'my_jobs'}
+            onOpenJobFromList={handleOpenJobFromJobsPage}
             onPhotoUploaded={handlePhotoUploaded}
             onSignOff={handleSignOff}
             isLoadingWo={isLoadingWo}
