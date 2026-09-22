@@ -48,11 +48,31 @@ app.use((req, _res, next) => {
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// CORS & Preflight support for Vercel preview branches and custom domains
+// CORS & Preflight support for Vercel preview branches and custom domains.
+// Restrict to a known-origin allowlist instead of '*'; same-origin requests
+// (the SPA and API are served together) need no CORS header at all.
+function isAllowedOrigin(origin?: string): boolean {
+  if (!origin) return false;
+  const allowlist: (string | RegExp)[] = [];
+  if (process.env.APP_URL) allowlist.push(process.env.APP_URL.replace(/\/$/, ''));
+  if (process.env.VERCEL_URL) allowlist.push(`https://${process.env.VERCEL_URL}`);
+  if (process.env.VERCEL_BRANCH_URL) allowlist.push(`https://${process.env.VERCEL_BRANCH_URL}`);
+  // Vercel auto-assigns *.vercel.app preview URLs; allow Hays + Sons custom domains.
+  allowlist.push(/^https:\/\/[\w-]+\.vercel\.app$/i);
+  allowlist.push(/^https:\/\/[\w.-]*haysandsons\.com$/i);
+  return allowlist.some((allowed) =>
+    typeof allowed === 'string' ? allowed === origin : allowed.test(origin)
+  );
+}
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-user-id');
+  const origin = req.headers.origin;
+  if (origin && typeof origin === 'string' && isAllowedOrigin(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  }
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -221,7 +241,10 @@ function verifyPassword(password: string, salt: string, hash: string): boolean {
 }
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-const AUTH_SECRET = process.env.AUTH_SECRET || 'fieldproof_secret_auth_key_v2_2026';
+const AUTH_SECRET = process.env.AUTH_SECRET || (() => {
+  console.warn('[WARNING] AUTH_SECRET environment variable is not set. Using a randomly generated secret for this process; user sessions will not persist across restarts.');
+  return crypto.randomBytes(32).toString('hex');
+})();
 
 interface TokenPayload {
   uid: string;
@@ -355,12 +378,9 @@ function getUserFromRequest(req: express.Request): UserRecord | null {
     }
   }
 
-  // 2. Fallback header check for authenticated clients
-  const headerUserId = req.headers['x-user-id'];
-  if (headerUserId && typeof headerUserId === 'string' && usersDb[headerUserId]) {
-    return usersDb[headerUserId];
-  }
-
+  // No unauthenticated fallback: callers must present a valid Bearer token.
+  // (The previous 'x-user-id' header trust allowed cross-origin impersonation
+  // of any user by supplying a guessable ID.)
   return null;
 }
 
@@ -417,7 +437,7 @@ const DATA_FILE = path.join(DATA_DIR, 'app_database.json');
 let customAppsScriptUrl: string = process.env.APPS_SCRIPT_URL || '';
 
 function getEffectiveAppsScriptUrl(): string {
-  return customAppsScriptUrl.trim() || process.env.APPS_SCRIPT_URL || 'https://script.google.com/macros/s/AKfycbxTdjnuW0S1yTm3xLVCtrPVbC-noNgJsiF2Rx7qV8xmq9g3beKThakEP_ld5y4OtLR2/exec';
+  return customAppsScriptUrl.trim() || process.env.APPS_SCRIPT_URL || '';
 }
 
 function saveDatabaseState() {
@@ -588,7 +608,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
           if (!existing) {
             const subId = sub.id || `usr_sub_${Date.now().toString(36)}`;
             const salt = `salt_sub_${Date.now()}`;
-            const effectivePass = subPass || 'Password123!';
+            const effectivePass = subPass || crypto.randomBytes(12).toString('base64url');
             usersDb[subId] = {
               id: subId,
               email: cleanEmail,
@@ -632,7 +652,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
           if (!existing) {
             const pmId = pm.id || `usr_pm_${Date.now().toString(36)}`;
             const salt = `salt_pm_${Date.now()}`;
-            const effectivePass = pmPass || 'Password123!';
+            const effectivePass = pmPass || crypto.randomBytes(12).toString('base64url');
             usersDb[pmId] = {
               id: pmId,
               email: cleanEmail,
@@ -686,10 +706,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
 // 1. Load state from persistent local disk
 loadDatabaseState();
 
-// 2. Hydrate seed demo accounts if not already stored
-ensureSeedUsers();
-
-// 3. Sync from Google Sheets in background (only in persistent servers, never unhandled in serverless init)
+// 2. Sync from Google Sheets in background (only in persistent servers, never unhandled in serverless init)
 if (!isServerlessRuntime) {
   syncFromGoogleSheets().catch(err => {
     console.warn('Initial background sync notice:', err?.message);
@@ -737,118 +754,14 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-function ensureSeedUsers() {
-  const pms = Object.values(usersDb).filter(u => u.role === 'pm');
-  if (pms.length === 0) {
-    const pmId = 'usr_pm_default';
-    const pmSalt = 'salt_pm_default';
-    usersDb[pmId] = {
-      id: pmId,
-      email: 'pm@haysandsons.com',
-      name: 'Ryan Russell',
-      role: 'pm',
-      company: 'Hays + Sons Restoration',
-      trade: 'General Restoration & Project Management',
-      phone: '(260) 210-0415',
-      assignedWoIds: [],
-      permissions: [
-        'create_work_order',
-        'view_all_work_orders',
-        'edit_work_order',
-        'delete_work_order',
-        'view_analytics'
-      ],
-      salt: pmSalt,
-      passwordHash: hashPassword('Password123!', pmSalt),
-      tempPassword: 'Password123!',
-      createdAt: new Date().toISOString()
-    };
-  }
-
-  const subs = Object.values(usersDb).filter(u => u.role === 'subcontractor');
-  if (subs.length === 0) {
-    const subId = 'usr_sub_default';
-    const subSalt = 'salt_sub_default';
-    const woIds = Object.keys(workOrdersDb);
-    usersDb[subId] = {
-      id: subId,
-      email: 'sub@contractor.com',
-      name: 'Dave Miller',
-      role: 'subcontractor',
-      company: 'Apex Drywall & Finishing',
-      trade: 'Drywall, Finishing & Painting',
-      phone: '(260) 555-0199',
-      assignedWoIds: woIds.length > 0 ? [woIds[0]] : [],
-      permissions: [
-        'view_assigned_work_orders',
-        'upload_photos',
-        'sign_off_work_order'
-      ],
-      salt: subSalt,
-      passwordHash: hashPassword('Password123!', subSalt),
-      tempPassword: 'Password123!',
-      createdAt: new Date().toISOString()
-    };
-    if (woIds.length > 0 && workOrdersDb[woIds[0]]) {
-      workOrdersDb[woIds[0]].assignedSubId = subId;
-      workOrdersDb[woIds[0]].subName = 'Apex Drywall & Finishing';
-    }
-  }
-}
-
 app.get('/api/auth/status', (req, res) => {
-  ensureSeedUsers();
   const pms = Object.values(usersDb).filter(u => u.role === 'pm');
   const subs = Object.values(usersDb).filter(u => u.role === 'subcontractor');
   res.json({
     success: true,
     hasProjectManager: pms.length > 0,
     pmCount: pms.length,
-    subcontractorCount: subs.length,
-    demoAccounts: {
-      pm: {
-        email: pms[0]?.email || 'pm@haysandsons.com',
-        name: pms[0]?.name || 'Ryan Russell',
-        role: 'pm',
-        company: pms[0]?.company || 'Hays + Sons Restoration'
-      },
-      subcontractor: {
-        email: subs[0]?.email || 'sub@contractor.com',
-        name: subs[0]?.name || 'Dave Miller',
-        role: 'subcontractor',
-        company: subs[0]?.company || 'Apex Drywall & Finishing'
-      }
-    }
-  });
-});
-
-app.post('/api/auth/quick-login', (req, res) => {
-  ensureSeedUsers();
-  let body = req.body || {};
-  if (typeof body === 'string') {
-    try { body = JSON.parse(body); } catch { /* ignore */ }
-  }
-  const { role } = body;
-  const targetRole = role === 'subcontractor' ? 'subcontractor' : 'pm';
-  let user = Object.values(usersDb).find(u => u.role === targetRole);
-  if (!user) {
-    user = Object.values(usersDb)[0];
-  }
-  if (!user) {
-    return res.status(404).json({ success: false, error: 'User account not available.' });
-  }
-
-  const token = generateSecureToken(user);
-  sessionsDb[token] = {
-    token,
-    userId: user.id,
-    expiresAt: Date.now() + SEVEN_DAYS_MS
-  };
-
-  res.json({
-    success: true,
-    token,
-    user: getSafeUser(user, token)
+    subcontractorCount: subs.length
   });
 });
 
@@ -864,7 +777,6 @@ app.post('/api/sync/refresh', async (req, res) => {
 // 2. Authentication: Create Project Manager Account (Setup)
 app.post('/api/auth/register-pm', async (req, res) => {
   try {
-    ensureSeedUsers();
     let body = req.body || {};
     if (typeof body === 'string') {
       try { body = JSON.parse(body); } catch { /* ignore */ }
@@ -962,8 +874,6 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Email and password are required.' });
     }
 
-    ensureSeedUsers();
-
     const cleanEmail = String(email).toLowerCase().trim();
     const trimmedPass = String(password).trim();
 
@@ -974,15 +884,6 @@ app.post('/api/auth/login', async (req, res) => {
       user = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
     }
 
-    // Friendly aliases for easy login
-    if (!user && (cleanEmail === 'pm@haysandsons.com' || cleanEmail === 'pm')) {
-      user = Object.values(usersDb).find(u => u.role === 'pm');
-    } else if (!user && (cleanEmail === 'sub@contractor.com' || cleanEmail === 'sub' || cleanEmail === 'subcontractor')) {
-      user = Object.values(usersDb).find(u => u.role === 'subcontractor');
-    }
-
-    const isDemoPass = ['password123', 'Password123!', 'hays2026', 'sub2026'].includes(trimmedPass);
-
     let isPasswordValid = false;
     if (user) {
       if (verifyPassword(trimmedPass, user.salt, user.passwordHash)) {
@@ -990,8 +891,6 @@ app.post('/api/auth/login', async (req, res) => {
       } else if (user.tempPassword && user.tempPassword === trimmedPass) {
         isPasswordValid = true;
       } else if (user.password && user.password === trimmedPass) {
-        isPasswordValid = true;
-      } else if (isDemoPass) {
         isPasswordValid = true;
       }
     }
@@ -1061,8 +960,6 @@ app.post('/api/auth/login', async (req, res) => {
 // 3. Authentication: Register
 app.post('/api/auth/register', async (req, res) => {
   try {
-    ensureSeedUsers();
-
     let body = req.body || {};
     if (typeof body === 'string') {
       try {
@@ -1361,6 +1258,7 @@ app.delete('/api/jobs/:id', (req, res) => {
   });
 
   delete jobsDb[id];
+  saveDatabaseState();
 
   // Synchronize deletion with Google Sheets
   callAppsScript('deleteJob', { jobId: id, woIds: deletedWoIds }).catch(err => {
@@ -1443,7 +1341,7 @@ app.get('/api/pm/subcontractors', (req, res) => {
         totalItems,
         completedItems,
         lastActive: lastAct ? lastAct.timestamp : 'Recently registered',
-        tempPassword: u.tempPassword || 'Password123!'
+        tempPassword: u.tempPassword || ''
       };
     });
 
@@ -1475,7 +1373,7 @@ app.post('/api/pm/subcontractors', (req, res) => {
 
     const subId = `usr_sub_${Date.now().toString(36)}`;
     const subSalt = `salt_sub_${Date.now()}`;
-    const initialPassword = password || 'Password123!';
+    const initialPassword = String(password || '').trim() || crypto.randomBytes(12).toString('base64url');
     const passwordHash = hashPassword(initialPassword, subSalt);
 
     const newSub: UserRecord = {
@@ -1582,6 +1480,7 @@ app.delete('/api/pm/subcontractors/:id', (req, res) => {
       delete sessionsDb[t];
     }
   });
+  saveDatabaseState();
 
   // Synchronize deletion with Google Sheets
   callAppsScript('deleteSubcontractor', { subId: id, email: subEmail }).catch(err => {
@@ -1667,7 +1566,6 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       pdfBase64, 
       mimeType, 
       fileName, 
-      isSample, 
       textSnippet, 
       autoCreate, 
       assignedSubId, 
@@ -1823,69 +1721,30 @@ Return JSON strictly adhering to this schema.`;
         suggestedTrade: 'General Restoration',
         totalEstimate: total,
         notes: 'Line-item restoration scope extracted from submitted estimate. Subcontractor photo verification required for each item before sign-off.',
-        tasks: [
-          'Detach & reset perimeter baseboards and trim without damaging drywall',
-          'Remove water-damaged flooring and sound crack underlayment membrane',
-          'Inspect subfloor moisture level and verify below dry standard (<15%)',
-          'Install replacement sound/crack moisture barrier underlayment',
-          'Install replacement vinyl plank (LVP) flooring with clean perimeter cuts',
-          'Install door transition strips and reducers at carpet thresholds',
-          'Mask and prep baseboard trim for one coat finish paint',
-          'Paint baseboard with one coat finish paint',
-          'Disconnect, inspect and reconnect appliance water supply lines',
-          'Post-construction cleanup and disposal of all debris'
-        ],
-        tradeBreakdown: [
-          {
-            tradeName: 'Flooring & Underlayment',
-            tasks: [
-              'Remove damaged flooring and underlayment',
-              'Install moisture barrier and sound membrane',
-              'Install replacement vinyl plank / finish flooring',
-              'Install transition strips and reducers'
-            ]
-          },
-          {
-            tradeName: 'Trim & Painting',
-            tasks: [
-              'Detach and reset perimeter baseboards',
-              'Prep and mask adjoining wall surfaces',
-              'Apply one coat latex enamel finish paint'
-            ]
-          },
-          {
-            tradeName: 'Site Cleanup',
-            tasks: [
-              'Haul all demolition debris to job trailer',
-              'Final broom swept and post-construction vacuum cleaning'
-            ]
-          }
-        ],
-        roomBreakdown: [
-          {
-            roomName: 'Main Work Area',
-            tasks: [
-              'Detach and reset baseboards',
-              'Remove damaged flooring',
-              'Install new underlayment and flooring',
-              'Paint baseboard and clean work area'
-            ]
-          }
-        ]
+        tasks: [],
+        tradeBreakdown: [],
+        roomBreakdown: []
       };
       extractionMethod = 'regex_pattern_engine';
     }
 
+    if (autoCreate && (!Array.isArray(extractedData.tasks) || extractedData.tasks.length === 0)) {
+      return res.status(400).json({
+        success: false,
+        error: 'No line-item tasks could be extracted from this estimate. Please review the document or enter the scope manually before auto-dispatching a work order.'
+      });
+    }
+
     // 6. ALWAYS CREATE THE JOB FROM THE EXTRACTED ESTIMATE
     const jobId = `JOB-${Math.floor(100 + Math.random() * 900)}`;
-    const custName = extractedData.insuredName || extractedData.customerName || 'Customer';
-    const propAddr = extractedData.propertyAddress || '8704 Alamasa Pl, Fort Wayne, IN';
+    const custName = extractedData.insuredName || extractedData.customerName || '';
+    const propAddr = extractedData.propertyAddress || '';
 
     const createdJob: JobRecord = {
       id: jobId,
       customerName: custName,
       propertyAddress: propAddr,
-      phone: (extractedData as any).phone || '(260) 414-8832',
+      phone: (extractedData as any).phone || '',
       email: (extractedData as any).email || '',
       claimNumber: extractedData.claimNumber || `CLM-${Math.floor(100000 + Math.random() * 900000)}`,
       lossType: extractedData.lossType || 'Restoration',
@@ -1927,8 +1786,8 @@ Return JSON strictly adhering to this schema.`;
           resolvedSubName = matched.company || matched.name;
           resolvedSubPhone = matched.phone || '';
         } else {
-          resolvedSubName = customSubName || 'Apex Flooring Specialists LLC';
-          resolvedSubPhone = '(260) 555-0199';
+          resolvedSubName = customSubName || '';
+          resolvedSubPhone = '';
         }
       } else {
         const subUser = usersDb[resolvedSubId];
@@ -1938,6 +1797,15 @@ Return JSON strictly adhering to this schema.`;
         }
       }
 
+      if (!resolvedSubName) {
+        delete jobsDb[jobId];
+        saveDatabaseState();
+        return res.status(400).json({
+          success: false,
+          error: 'No matching subcontractor was found. Create a subcontractor account first, then retry auto-dispatch.'
+        });
+      }
+
       // Generate Work Order ID
       const randomNum = Math.floor(1000 + Math.random() * 9000);
       let woId = `WO-${randomNum}`;
@@ -1945,7 +1813,7 @@ Return JSON strictly adhering to this schema.`;
       // Synchronize with Google Sheets in background (non-blocking)
       callAppsScript('createWorkOrder', {
         project: extractedData.projectName,
-        unit: extractedData.unitArea || 'Main Level',
+        unit: extractedData.unitArea || '',
         subName: resolvedSubName,
         subPhone: resolvedSubPhone,
         subEmail: resolvedSubId && usersDb[resolvedSubId] ? usersDb[resolvedSubId].email : '',

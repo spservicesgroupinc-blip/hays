@@ -395,7 +395,7 @@ function registerSubcontractor(company, name, trade, email, phone, password) {
   var cleanEmail = String(email || '').trim().toLowerCase();
   var dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
   var subId = 'SUB-' + (Math.floor(1000 + Math.random() * 9000));
-  var pwd = String(password || '').trim() || 'Password123!';
+  var pwd = String(password || '').trim() || Utilities.getUuid().slice(0, 12);
 
   // Check if subcontractor already exists by email
   var existingRow = -1;
@@ -456,7 +456,7 @@ function registerProjectManager(name, email, company, phone, password) {
   var cleanEmail = String(email || '').trim().toLowerCase();
   var dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
   var pmId = 'PM-' + (Math.floor(1000 + Math.random() * 9000));
-  var pwd = String(password || '').trim() || 'Password123!';
+  var pwd = String(password || '').trim() || Utilities.getUuid().slice(0, 12);
 
   // Check if Project Manager already exists by email
   var existingRow = -1;
@@ -517,17 +517,15 @@ function authenticateUser(email, password) {
     return { success: false, error: 'Email and password are required.' };
   }
 
-  var isMasterPass = ['Password123!', 'password123', 'hays2026', 'sub2026'].indexOf(cleanPass) !== -1;
-
   // 1. Check Project Managers sheet
   var pmSheet = ss.getSheetByName(CONFIG.SHEET_PROJECT_MANAGERS);
   if (pmSheet && pmSheet.getLastRow() > 1) {
     var pmData = pmSheet.getDataRange().getValues();
     for (var m = 1; m < pmData.length; m++) {
       var rowEmail = String(pmData[m][2] || '').trim().toLowerCase();
-      if (rowEmail === cleanEmail || (cleanEmail === 'pm@haysandsons.com' && m === 1)) {
+      if (rowEmail === cleanEmail) {
         var rowPass = String(pmData[m][7] || '').trim();
-        if (!rowPass || rowPass === cleanPass || isMasterPass) {
+        if (rowPass === cleanPass) {
           return {
             success: true,
             user: {
@@ -553,9 +551,9 @@ function authenticateUser(email, password) {
     var subData = subSheet.getDataRange().getValues();
     for (var k = 1; k < subData.length; k++) {
       var sEmail = String(subData[k][4] || '').trim().toLowerCase();
-      if (sEmail === cleanEmail || (cleanEmail === 'sub@contractor.com' && k === 1)) {
+      if (sEmail === cleanEmail) {
         var sPass = String(subData[k][8] || '').trim();
-        if (!sPass || sPass === cleanPass || isMasterPass) {
+        if (sPass === cleanPass) {
           return {
             success: true,
             user: {
@@ -573,37 +571,6 @@ function authenticateUser(email, password) {
         }
       }
     }
-  }
-
-  // If email is pm or sub alias
-  if (cleanEmail === 'pm@haysandsons.com' && isMasterPass) {
-    return {
-      success: true,
-      user: {
-        id: 'usr_pm_default',
-        name: 'Ryan Russell',
-        email: 'pm@haysandsons.com',
-        role: 'pm',
-        company: 'Hays + Sons Restoration',
-        phone: '(260) 210-0415',
-        trade: 'General Restoration & Project Management'
-      }
-    };
-  }
-
-  if (cleanEmail === 'sub@contractor.com' && isMasterPass) {
-    return {
-      success: true,
-      user: {
-        id: 'usr_sub_default',
-        name: 'Dave Miller',
-        email: 'sub@contractor.com',
-        role: 'subcontractor',
-        company: 'Apex Drywall & Finishing',
-        phone: '(260) 555-0199',
-        trade: 'Drywall, Finishing & Painting'
-      }
-    };
   }
 
   return { success: false, error: 'No registered account found for ' + cleanEmail + '.' };

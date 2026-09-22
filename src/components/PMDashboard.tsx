@@ -86,7 +86,7 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
     trade: 'Drywall, Finishing & Painting',
     email: '',
     phone: '',
-    password: 'Password123!'
+    password: ''
   });
   const [isSubmittingSub, setIsSubmittingSub] = useState(false);
 
@@ -359,7 +359,7 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
         trade: 'Drywall, Finishing & Painting',
         email: '',
         phone: '',
-        password: 'Password123!'
+        password: ''
       });
       await fetchSubcontractors();
     } else {
@@ -1014,7 +1014,7 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
                   type="text"
                   value={newSubForm.company}
                   onChange={(e) => setNewSubForm({ ...newSubForm, company: e.target.value })}
-                  placeholder="e.g. Apex Flooring Specialists"
+                  placeholder="e.g. Precision Flooring LLC"
                   required
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#C81D25]"
                 />
@@ -1026,7 +1026,7 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
                   type="text"
                   value={newSubForm.name}
                   onChange={(e) => setNewSubForm({ ...newSubForm, name: e.target.value })}
-                  placeholder="e.g. Dave Miller"
+                  placeholder="e.g. John Smith"
                   required
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#C81D25]"
                 />
@@ -1062,7 +1062,7 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
                     type="tel"
                     value={newSubForm.phone}
                     onChange={(e) => setNewSubForm({ ...newSubForm, phone: e.target.value })}
-                    placeholder="(260) 555-0199"
+                    placeholder="(260) 555-0123"
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#C81D25]"
                   />
                 </div>
@@ -1070,18 +1070,17 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Initial Subcontractor Password *
+                  Initial Subcontractor Password
                 </label>
                 <input
                   type="text"
                   value={newSubForm.password}
                   onChange={(e) => setNewSubForm({ ...newSubForm, password: e.target.value })}
-                  placeholder="Password123!"
-                  required
+                  placeholder="Leave blank to auto-generate"
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#C81D25]"
                 />
                 <p className="text-[10px] text-slate-400 mt-1">
-                  Share this password with the subcontractor so they can sign into the mobile field portal.
+                  Leave blank to auto-generate a secure temporary password. Share it with the subcontractor so they can sign into the mobile field portal.
                 </p>
               </div>
 

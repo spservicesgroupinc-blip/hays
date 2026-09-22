@@ -9,8 +9,6 @@ import {
   ArrowRight,
   Briefcase,
   LogOut,
-  Sparkles,
-  ArrowLeftRight,
   Eye,
   EyeOff,
   AlertCircle,
@@ -43,23 +41,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   if (!isOpen) return null;
-
-  const handleQuickSwitch = async (role: 'pm' | 'subcontractor') => {
-    setIsLoading(true);
-    setError(null);
-    const { ok, data, error: fetchErr } = await safeFetchJson<{ success: boolean; user: UserType; token: string; error?: string }>('/api/auth/quick-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role })
-    });
-    if (!ok || !data?.success) {
-      setError(fetchErr || data?.error || 'Failed to switch profile.');
-      setIsLoading(false);
-      return;
-    }
-    onLoginSuccess(data.user, data.token);
-    onClose();
-  };
 
   const handleDirectLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -165,60 +146,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     )}
                   </div>
                 </div>
-              </div>
-
-              {/* 1-Click Role Switcher */}
-              <div className="space-y-2">
-                <div className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                  <ArrowLeftRight className="w-3.5 h-3.5 text-slate-500" />
-                  <span>Switch Role in 1 Click</span>
-                </div>
-
-                {currentUser.role === 'pm' ? (
-                  <button
-                    id="btn-switch-to-sub"
-                    onClick={() => handleQuickSwitch('subcontractor')}
-                    disabled={isLoading}
-                    className="w-full flex items-center justify-between p-3 rounded-xl border border-slate-200 hover:border-amber-400 bg-amber-50/50 hover:bg-amber-50 text-left transition group"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-700 flex items-center justify-center shrink-0">
-                        <HardHat className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-bold text-slate-900 group-hover:text-amber-800">
-                          Switch to Subcontractor View
-                        </div>
-                        <div className="text-[10px] text-slate-500">
-                          Dave Miller • Apex Drywall & Finishing
-                        </div>
-                      </div>
-                    </div>
-                    <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-amber-600 transition" />
-                  </button>
-                ) : (
-                  <button
-                    id="btn-switch-to-pm"
-                    onClick={() => handleQuickSwitch('pm')}
-                    disabled={isLoading}
-                    className="w-full flex items-center justify-between p-3 rounded-xl border border-slate-200 hover:border-red-400 bg-red-50/50 hover:bg-red-50 text-left transition group"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-8 h-8 rounded-lg bg-[#C81D25]/15 text-[#C81D25] flex items-center justify-center shrink-0">
-                        <Briefcase className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-bold text-slate-900 group-hover:text-red-700">
-                          Switch to Project Manager View
-                        </div>
-                        <div className="text-[10px] text-slate-500">
-                          Ryan Russell • Hays + Sons Restoration
-                        </div>
-                      </div>
-                    </div>
-                    <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-red-600 transition" />
-                  </button>
-                )}
               </div>
 
               {/* Explicit, Big Sign Out Button */}

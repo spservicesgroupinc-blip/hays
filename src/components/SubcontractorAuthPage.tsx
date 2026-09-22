@@ -10,8 +10,7 @@ import {
   CheckCircle2, 
   Briefcase,
   Eye,
-  EyeOff,
-  Sparkles
+  EyeOff
 } from 'lucide-react';
 import { User, UserRole } from '../types';
 import { HaysLogo } from './HaysLogo';
@@ -40,7 +39,6 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
 
   // Status states
   const [isLoading, setIsLoading] = useState(false);
-  const [quickLoadingRole, setQuickLoadingRole] = useState<'pm' | 'subcontractor' | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
 
@@ -68,27 +66,6 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
     if (!ok || !data?.success) {
       setErrorMessage(error || data?.error || 'Invalid email or password.');
       setIsLoading(false);
-      return;
-    }
-
-    onLoginSuccess(data.user, data.token);
-  };
-
-  // Instant 1-Click Quick Demo Login
-  const handleQuickLogin = async (role: 'pm' | 'subcontractor') => {
-    setErrorMessage(null);
-    setSuccessNotice(null);
-    setQuickLoadingRole(role);
-
-    const { ok, data, error } = await safeFetchJson<{ success: boolean; user: User; token: string; error?: string }>('/api/auth/quick-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role })
-    });
-
-    if (!ok || !data?.success) {
-      setErrorMessage(error || data?.error || 'Quick login failed. Please try standard sign in.');
-      setQuickLoadingRole(null);
       return;
     }
 
@@ -253,7 +230,7 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
                       id="input-login-email"
                       type="email"
                       required
-                      placeholder="name@haysandsons.com or sub@contractor.com"
+                      placeholder="name@company.com"
                       value={email}
                       onChange={e => setEmail(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-[#C81D25] focus:ring-1 focus:ring-[#C81D25] transition"
@@ -290,7 +267,7 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
                 <button
                   id="btn-login-submit"
                   type="submit"
-                  disabled={isLoading || quickLoadingRole !== null}
+                  disabled={isLoading}
                   className="w-full py-3 px-4 rounded-xl font-bold text-white bg-[#C81D25] hover:bg-[#A3161D] shadow-lg shadow-[#C81D25]/25 transition-all flex items-center justify-center gap-2 mt-2 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   {isLoading ? (
@@ -302,54 +279,6 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
                     </>
                   )}
                 </button>
-
-                {/* Quick 1-Click Demo Logins Section */}
-                <div className="pt-4 border-t border-slate-800/80">
-                  <div className="flex items-center justify-between mb-2.5">
-                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                      1-Click Instant Demo Access
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <button
-                      id="btn-quick-pm"
-                      type="button"
-                      disabled={isLoading || quickLoadingRole !== null}
-                      onClick={() => handleQuickLogin('pm')}
-                      className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 text-left transition group"
-                    >
-                      <div className="w-7 h-7 rounded-lg bg-[#C81D25]/20 text-red-400 border border-[#C81D25]/30 flex items-center justify-center shrink-0">
-                        <Briefcase className="w-3.5 h-3.5" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs font-bold text-white group-hover:text-red-300 transition">
-                          {quickLoadingRole === 'pm' ? 'Signing in...' : 'Project Manager'}
-                        </div>
-                        <div className="text-[10px] text-slate-400 truncate">Ryan Russell (PM)</div>
-                      </div>
-                    </button>
-
-                    <button
-                      id="btn-quick-sub"
-                      type="button"
-                      disabled={isLoading || quickLoadingRole !== null}
-                      onClick={() => handleQuickLogin('subcontractor')}
-                      className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 text-left transition group"
-                    >
-                      <div className="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center justify-center shrink-0">
-                        <HardHat className="w-3.5 h-3.5" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs font-bold text-white group-hover:text-amber-300 transition">
-                          {quickLoadingRole === 'subcontractor' ? 'Signing in...' : 'Subcontractor'}
-                        </div>
-                        <div className="text-[10px] text-slate-400 truncate">Dave Miller (Crew)</div>
-                      </div>
-                    </button>
-                  </div>
-                </div>
 
                 {/* Create Account Link */}
                 <div className="text-center pt-3 border-t border-slate-800/80">
@@ -380,7 +309,7 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
                       id="input-reg-name"
                       type="text"
                       required
-                      placeholder="e.g. Dave Miller"
+                      placeholder="e.g. John Smith"
                       value={name}
                       onChange={e => setName(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-[#C81D25] focus:ring-1 focus:ring-[#C81D25] transition"
@@ -447,7 +376,7 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
                     <input
                       id="input-reg-company"
                       type="text"
-                      placeholder={registerRole === 'pm' ? 'Hays + Sons Restoration' : 'e.g. Apex Drywall LLC'}
+                      placeholder={registerRole === 'pm' ? 'Your Company Name' : 'e.g. Precision Builders LLC'}
                       value={company}
                       onChange={e => setCompany(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-[#C81D25] focus:ring-1 focus:ring-[#C81D25] transition"
