@@ -304,7 +304,12 @@ export const PMDashboard: React.FC<PMDashboardProps> = ({
           (lowerTrade.includes('drywall') && s.trade.toLowerCase().includes('drywall')) ||
           (lowerTrade.includes('carpen') && s.trade.toLowerCase().includes('carpen')) ||
           (lowerTrade.includes('paint') && s.trade.toLowerCase().includes('paint')) ||
-          (lowerTrade.includes('plumb') && s.trade.toLowerCase().includes('plumb'))
+          (lowerTrade.includes('plumb') && s.trade.toLowerCase().includes('plumb')) ||
+          (lowerTrade.includes('elect') && s.trade.toLowerCase().includes('elect')) ||
+          (lowerTrade.includes('mechanical') && s.trade.toLowerCase().includes('mechanical')) ||
+          (lowerTrade.includes('content') && s.trade.toLowerCase().includes('content')) ||
+          (lowerTrade.includes('demolition') && s.trade.toLowerCase().includes('demo')) ||
+          (lowerTrade.includes('clean') && s.trade.toLowerCase().includes('clean'))
         ) || subcontractors[0];
 
         await fetch('/api/work-orders', {

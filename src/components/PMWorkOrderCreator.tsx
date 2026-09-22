@@ -109,10 +109,10 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
         method: 'POST',
         headers,
         body: JSON.stringify({
-          base64: base64Data,
+          pdfBase64: fileObj ? base64Data : '',
           mimeType,
           fileName,
-          rawText: rawText || '',
+          textSnippet: rawText || '',
           autoCreate: false
         })
       });
@@ -125,9 +125,10 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
       const data: ExtractedJobData = result.data;
       const job: Job = result.job || {
         id: `JOB-${Math.floor(100 + Math.random() * 900)}`,
-        customerName: data.insuredName || '',
+        customerName: data.insuredName || (data as any).customerName || '',
         propertyAddress: data.propertyAddress || '',
         phone: (data as any).phone || '',
+        email: (data as any).email || '',
         claimNumber: data.claimNumber || '',
         lossType: data.lossType || '',
         totalEstimate: data.totalEstimate || '',
@@ -146,11 +147,11 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
         : [
             {
               tradeName: 'Flooring & Trim Restoration',
-              tasks: data.tasks.slice(0, 4)
+              tasks: (data.tasks || []).slice(0, 4)
             },
             {
               tradeName: 'Carpentry & Detach/Reset',
-              tasks: data.tasks.slice(4, 7)
+              tasks: (data.tasks || []).slice(4, 7)
             }
           ];
 
@@ -162,7 +163,12 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
           (lower.includes('paint') && s.trade.toLowerCase().includes('paint')) ||
           (lower.includes('detach') && s.trade.toLowerCase().includes('detach')) ||
           (lower.includes('carpen') && s.trade.toLowerCase().includes('carpen')) ||
-          (lower.includes('plumb') && s.trade.toLowerCase().includes('plumb'))
+          (lower.includes('plumb') && s.trade.toLowerCase().includes('plumb')) ||
+          (lower.includes('elect') && s.trade.toLowerCase().includes('elect')) ||
+          (lower.includes('mechanical') && s.trade.toLowerCase().includes('mechanical')) ||
+          (lower.includes('content') && s.trade.toLowerCase().includes('content')) ||
+          (lower.includes('demolition') && s.trade.toLowerCase().includes('demo')) ||
+          (lower.includes('clean') && s.trade.toLowerCase().includes('clean'))
         ) || subcontractors[0];
 
         return {

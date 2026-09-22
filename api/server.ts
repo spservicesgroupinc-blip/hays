@@ -1551,6 +1551,70 @@ function extractTextFromPdfBuffer(buf: Buffer): string {
   }
 }
 
+// Standard seven-trade crew fallback so pasted text and timed-out PDF extraction
+// still produce a complete, assignable trade breakdown for work order creation.
+function buildStandardTradeBreakdown(lossType: string): { tradeName: string; tasks: string[] }[] {
+  const loss = String(lossType || 'Restoration').toLowerCase();
+  const demoTask = loss.includes('fire') || loss.includes('smoke')
+    ? 'Demolish charred/affected building materials and dispose per IICRC standards.'
+    : loss.includes('storm')
+      ? 'Demolish storm-damaged materials and prepare surfaces for rebuild.'
+      : 'Detach, protect and reset affected contents; remove damaged materials.';
+
+  return [
+    {
+      tradeName: 'Contents Handling, Site Protection & Demolition Crew',
+      tasks: [
+        'Inventory, pack and move contents from affected rooms to on-site storage.',
+        'Install dust containment: plastic barriers, tension posts, zipper access and HEPA air scrubbers.',
+        demoTask
+      ]
+    },
+    {
+      tradeName: 'Plumbing & Mechanical Trade Crew',
+      tasks: [
+        'Isolate and verify utilities; detach, cap-off and reset sinks, faucets, angle stops and toilets.',
+        'Disconnect/reconnect water lines and appliances per manufacturer specifications.'
+      ]
+    },
+    {
+      tradeName: 'Electrical Trade Crew',
+      tasks: [
+        'Perform lockout/tagout and verify circuits are de-energized before work.',
+        'Reset junction boxes; replace switches/outlets and reinstall light fixtures to code.'
+      ]
+    },
+    {
+      tradeName: 'Flooring & Underlayment Trade Crew',
+      tasks: [
+        'Verify subfloor is clean, dry and level; install moisture/membrane underlayment.',
+        'Install flooring (tile/LVP/laminate/carpet) per estimate square footage with transition strips and expansion gaps.'
+      ]
+    },
+    {
+      tradeName: 'Finish Carpentry, Doors & Cabinetry Crew',
+      tasks: [
+        'Detach and reset baseboard, casing and rosette blocks; record linear footages.',
+        'Remove/reset door slabs and hardware; install cabinetry, counter, toe kick and hardware.'
+      ]
+    },
+    {
+      tradeName: 'Painting & Surface Finishing Crew',
+      tasks: [
+        'Mask, sand and caulk per scope; protect tape-only areas.',
+        'Apply primer, paint coats and urethane/trim finishes per estimate locations and square footages.'
+      ]
+    },
+    {
+      tradeName: 'Post-Job Cleanup & Debris Removal Crew',
+      tasks: [
+        'Stage dump trailer and haul off construction waste.',
+        'Complete final post-construction cleaning: HEPA vacuum, surface wipe and fixture polish.'
+      ]
+    }
+  ];
+}
+
 // 6e. AI PDF ESTIMATE EXTRACTOR (Gemini 3.8 Flash Multimodal & Intelligent Fast Parser)
 app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
   try {
@@ -1573,7 +1637,12 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       scheduledDate 
     } = req.body;
 
-    if (!pdfBase64 && !textSnippet) {
+    // Accept both legacy client field names (base64/rawText) and the current
+    // names (pdfBase64/textSnippet) so the PM Upload Estimate page never fails.
+    const resolvedBase64 = (pdfBase64 || req.body.base64 || '').toString().trim();
+    const resolvedText = (textSnippet || req.body.rawText || req.body.text || '').toString().trim();
+
+    if (!resolvedBase64 && !resolvedText) {
       return res.status(400).json({ 
         success: false, 
         error: 'Please upload an estimate PDF or enter estimate text to extract project scope.' 
@@ -1586,8 +1655,8 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
     // 1. Extract text from base64 if provided
     let pdfTextExtracted = '';
     let cleanBase64 = '';
-    if (pdfBase64 && typeof pdfBase64 === 'string') {
-      cleanBase64 = pdfBase64.includes('base64,') ? pdfBase64.split('base64,')[1] : pdfBase64;
+    if (resolvedBase64) {
+      cleanBase64 = resolvedBase64.includes('base64,') ? resolvedBase64.split('base64,')[1] : resolvedBase64;
       try {
         const buffer = Buffer.from(cleanBase64, 'base64');
         pdfTextExtracted = extractTextFromPdfBuffer(buffer);
@@ -1596,10 +1665,10 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       }
     }
 
-    const combinedText = `${textSnippet || ''}\n${pdfTextExtracted}\n${fileName || ''}`.trim();
+    const combinedText = `${resolvedText}\n${pdfTextExtracted}\n${fileName || ''}`.trim();
 
     // 2. If Gemini 3.8 Flash is available, try AI multimodal extraction with timeout
-    if (!extractedData && process.env.GEMINI_API_KEY && cleanBase64) {
+    if (!extractedData && process.env.GEMINI_API_KEY && (cleanBase64 || resolvedText)) {
       try {
         const effectiveMime = (mimeType && mimeType.includes('pdf')) 
           ? 'application/pdf' 
@@ -1607,30 +1676,48 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
 
         const ai = getGenAI();
         const prompt = `You are a Senior Project Manager & Restoration Estimator at Hays + Sons Complete Restoration.
-Analyze the attached restoration insurance estimate document (e.g. Xactimate, Symbility, contractor bid).
-Thoroughly extract the project details and translate the scope into actionable, verifiable line-item tasks for subcontractor photo verification.
+Analyze the submitted restoration insurance estimate (Xactimate, Symbility, contractor bid, or pasted estimate text).
+Extract the customer/job details and translate the full scope into actionable, verifiable line-item tasks organized under the seven standard Hays + Sons trade crews below.
 
-Extract the following structured information:
-1. projectName: A descriptive name, e.g. '[Insured Name] Residence - [Loss Type]' or '[Address] Restoration'.
-2. propertyAddress: The jobsite location/address.
-3. insuredName: The insured client or homeowner.
-4. claimNumber: Insurance claim number or estimate identifier.
-5. lossType: Type of loss (e.g. 'Water Damage', 'Fire/Smoke', 'Storm').
-6. unitArea: Primary affected area or rooms (e.g. 'Main Level - Kitchen, Dining, Bath & Foyer').
-7. suggestedTrade: The recommended subcontractor trade category for dispatch (e.g. 'Flooring & Trim', 'Plumbing', 'Carpentry & Detach/Reset', 'Drywall & Painting', or 'General Restoration').
-8. tasks: A list of 6 to 12 clear, concise, actionable scope items formatted for a subcontractor line-item photo checklist. Include measurements (LF, SF, EA) where stated in the estimate.
-9. tradeBreakdown: An array of objects grouping items by trade discipline: { tradeName: string, tasks: string[] }. Include trades found in the estimate (e.g. 'Flooring', 'Carpentry / Detach & Reset', 'Painting', 'Plumbing', 'Electrical', 'Demolition / Content').
-10. roomBreakdown: An array of objects grouping items by room/location: { roomName: string, tasks: string[] } (e.g. 'Kitchen', 'Entry/Foyer', 'Living Room', 'Bathroom', 'Mud Room').
-11. totalEstimate: The total estimated cost or Replacement Cost Value if stated (e.g. '$27,696.84').
-12. notes: Important project notes, estimator remarks, or warnings for field crew.
+CUSTOMER & JOB DATA (must be filled from the estimate so the job can be created):
+- customerName: insured/client/homeowner name (fall back to insuredName when available).
+- propertyAddress: the jobsite location/address.
+- phone and email: the insured/customer contact details when present.
+- claimNumber, lossType, unitArea, totalEstimate, notes.
+
+THE SEVEN STANDARD TRADE CREWS (use these exact names in tradeBreakdown):
+1. "Contents Handling, Site Protection & Demolition Crew" — per-room contents handling/moving instructions; dust containment setup (plastic barriers, tension posts, zipper access, air scrubbers); tear-out and surface prep (flooring removal, subfloor prep, concrete grinding).
+2. "Plumbing & Mechanical Trade Crew" — utility isolation and safety; detach, cap-off, and reset instructions for sinks, faucets, angle stops, toilets, water lines, and appliances.
+3. "Electrical Trade Crew" — lockout/tagout and code compliance; rewiring, junction box resets, switch/outlet replacements, and light fixture installations.
+4. "Flooring & Underlayment Trade Crew" — subfloor cleanliness inspection and moisture/membrane underlayment installation; exact square footages for tile, LVP, laminate, or carpet by room; transition strip locations and perimeter expansion gap requirements.
+5. "Finish Carpentry, Doors & Cabinetry Crew" — door slab/frame removal, door hardware installation, sidelite adjustments; baseboard, casing, and rosette block detach/reset instructions with exact linear footages; cabinetry, counter, toe kick, and hardware installation.
+6. "Painting & Surface Finishing Crew" — masking and surface prep (sanding, caulking, tape-only areas); exact locations and linear/square footages for primer, paint coats, urethane wood finishes, and trim staining.
+7. "Post-Job Cleanup & Debris Removal Crew" — dump trailer staging and construction waste haul-off; final post-construction cleaning (HEPA vacuuming, surface wiping, fixture polishing).
+
+Only include a crew when the estimate contains work for that discipline. For each crew, write 1-6 specific, concise, photo-verifiable line items with measurements (LF, SF, EA) where the estimate states them.
+
+ALSO RETURN:
+- tasks: the same line items flattened across all crews (6 to 20 items) for the subcontractor photo checklist.
+- roomBreakdown: { roomName, tasks[] } grouping items by room/location where possible.
+- suggestedTrade: the single most prominent trade discipline for dispatch.
 
 Return JSON strictly adhering to this schema.`;
 
-        // 6.5 second timeout safeguard for instant responsiveness
+        // AI multimodal/text extraction with an 8 second timeout safeguard
         const geminiCall = ai.models.generateContent({
           model: 'gemini-3.8-flash',
           contents: [
-            { inlineData: { mimeType: effectiveMime, data: cleanBase64 } },
+            ...(cleanBase64
+              ? [{
+                  inlineData: {
+                    mimeType: effectiveMime,
+                    data: cleanBase64
+                  }
+                }]
+              : []),
+            ...(resolvedText
+              ? [{ text: `--- ESTIMATE TEXT ---\n${resolvedText.slice(0, 60000)}` }]
+              : []),
             { text: prompt }
           ],
           config: {
@@ -1639,9 +1726,12 @@ Return JSON strictly adhering to this schema.`;
               type: Type.OBJECT,
               properties: {
                 projectName: { type: Type.STRING },
+                customerName: { type: Type.STRING },
                 propertyAddress: { type: Type.STRING },
                 insuredName: { type: Type.STRING },
                 claimNumber: { type: Type.STRING },
+                phone: { type: Type.STRING },
+                email: { type: Type.STRING },
                 lossType: { type: Type.STRING },
                 unitArea: { type: Type.STRING },
                 suggestedTrade: { type: Type.STRING },
@@ -1671,19 +1761,23 @@ Return JSON strictly adhering to this schema.`;
                 totalEstimate: { type: Type.STRING },
                 notes: { type: Type.STRING }
               },
-              required: ['projectName', 'unitArea', 'suggestedTrade', 'tasks']
+              required: ['projectName', 'tasks', 'tradeBreakdown']
             }
           }
         });
 
+        // 8 second timeout safeguard (still leaves room for the fallback parser
+        // and job creation before serverless function limits).
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Gemini call timed out')), 6500)
+          setTimeout(() => reject(new Error('Gemini call timed out')), 8000)
         );
 
         const response = await Promise.race([geminiCall, timeoutPromise]) as any;
         if (response && response.text) {
           const parsed = JSON.parse(response.text.trim());
-          if (parsed && parsed.projectName && parsed.tasks && parsed.tasks.length > 0) {
+          const hasTasks = Array.isArray(parsed.tasks) && parsed.tasks.length > 0;
+          const hasTrades = Array.isArray(parsed.tradeBreakdown) && parsed.tradeBreakdown.length > 0;
+          if (parsed && parsed.projectName && (hasTasks || hasTrades)) {
             extractedData = parsed;
             extractionMethod = 'gemini_3.8_flash';
           }
@@ -1693,6 +1787,13 @@ Return JSON strictly adhering to this schema.`;
       }
     }
 
+    // Normalize extracted data so downstream code always receives arrays.
+    if (extractedData) {
+      extractedData.tasks = Array.isArray(extractedData.tasks) ? extractedData.tasks : [];
+      extractedData.tradeBreakdown = Array.isArray(extractedData.tradeBreakdown) ? extractedData.tradeBreakdown : [];
+      extractedData.roomBreakdown = Array.isArray(extractedData.roomBreakdown) ? extractedData.roomBreakdown : [];
+    }
+
     // 5. Intelligent regex pattern fallback from combinedText if still null
     if (!extractedData) {
       const insuredMatch = combinedText.match(/(?:Insured|Customer|Client)[:\s]+([A-Za-z0-9\s.'-]+?)(?=\s+(?:Home|Cell|Business|Property|Claim|Phone|Email|E-mail)|[\r\n]|$)/i);
@@ -1700,6 +1801,8 @@ Return JSON strictly adhering to this schema.`;
       const claimMatch = combinedText.match(/(?:Claim Number|Claim #|Claim|Estimate)[:\s]+([A-Za-z0-9\-_]+)/i);
       const lossMatch = combinedText.match(/(?:Type of Loss|Loss Type|Cause of Loss)[:\s]+([A-Za-z0-9\s/]+?)(?=\s+[A-Z]|[\r\n]|$)/i);
       const totalMatch = combinedText.match(/(?:Total|Replacement Cost Value|Net Claim|Grand Total)[:\s$]*([0-9,]+\.\d{2})/i);
+      const phoneMatch = combinedText.match(/(?:Phone|Tel|Mobile|Cell)[:\s]*([+()0-9\s.-]{7,20})/i);
+      const emailMatch = combinedText.match(/(?:Email|E-mail)[:\s]*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
 
       const cleanedFileName = (fileName || 'Restoration_Job')
         .replace(/\.pdf$/i, '')
@@ -1711,18 +1814,23 @@ Return JSON strictly adhering to this schema.`;
       const loss = lossMatch ? lossMatch[1].trim() : 'Restoration';
       const total = totalMatch ? `$${totalMatch[1]}` : 'TBD';
 
+      const fallbackTradeBreakdown = buildStandardTradeBreakdown(loss);
+
       extractedData = {
         projectName: `${insured} - ${loss}`,
+        customerName: insured,
         propertyAddress: property,
         insuredName: insured,
+        phone: phoneMatch ? phoneMatch[1].trim() : '',
+        email: emailMatch ? emailMatch[1].trim() : '',
         claimNumber: claim,
         lossType: loss,
         unitArea: 'Primary Work Area',
         suggestedTrade: 'General Restoration',
         totalEstimate: total,
         notes: 'Line-item restoration scope extracted from submitted estimate. Subcontractor photo verification required for each item before sign-off.',
-        tasks: [],
-        tradeBreakdown: [],
+        tasks: fallbackTradeBreakdown.flatMap((t: any) => t.tasks),
+        tradeBreakdown: fallbackTradeBreakdown,
         roomBreakdown: []
       };
       extractionMethod = 'regex_pattern_engine';
@@ -1737,7 +1845,7 @@ Return JSON strictly adhering to this schema.`;
 
     // 6. ALWAYS CREATE THE JOB FROM THE EXTRACTED ESTIMATE
     const jobId = `JOB-${Math.floor(100 + Math.random() * 900)}`;
-    const custName = extractedData.insuredName || extractedData.customerName || '';
+    const custName = extractedData.insuredName || extractedData.customerName || extractedData.projectName || '';
     const propAddr = extractedData.propertyAddress || '';
 
     const createdJob: JobRecord = {
