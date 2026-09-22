@@ -137,7 +137,8 @@ function doPost(e) {
           {
             jobId: contents.jobId,
             trade: contents.trade,
-            assignedSubId: contents.assignedSubId
+            assignedSubId: contents.assignedSubId,
+            woId: contents.woId
           }
         );
         break;
@@ -589,11 +590,23 @@ function createWorkOrder(project, unit, subName, subPhone, subEmail, date, lineI
     throw new Error('At least one task line item is required.');
   }
 
-  // Generate unique Work Order ID: WO-XXXX
-  var woId = 'WO-' + (Math.floor(1000 + Math.random() * 9000));
-  var existingIds = woSheet.getRange('A:A').getValues().flat();
-  while (existingIds.indexOf(woId) !== -1) {
-    woId = 'WO-' + (Math.floor(1000 + Math.random() * 9000));
+  // Reuse the app-issued Work Order ID when supplied so the Sheet and the
+  // FieldProof database always agree; otherwise allocate the next sequential id
+  // (random ids used to collide and silently overwrite rows).
+  var existingIds = woSheet.getRange('A:A').getValues().flat().map(function (value) {
+    return String(value || '').trim().toUpperCase();
+  });
+  var woId = String((metadata && metadata.woId) || '').trim().toUpperCase();
+  if (!woId || existingIds.indexOf(woId) !== -1) {
+    var highest = 0;
+    existingIds.forEach(function (existing) {
+      var match = existing.match(/^WO-(\d+)$/);
+      if (match) highest = Math.max(highest, Number(match[1]));
+    });
+    do {
+      highest += 1;
+      woId = 'WO-' + ('0000' + highest).slice(-4);
+    } while (existingIds.indexOf(woId) !== -1);
   }
 
   var totalItems = lineItemsArray.length;

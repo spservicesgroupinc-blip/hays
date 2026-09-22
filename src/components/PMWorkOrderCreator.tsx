@@ -59,6 +59,17 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
   }>>([]);
   const [isCreatingWorkOrders, setIsCreatingWorkOrders] = useState(false);
 
+  // What the extraction pipeline actually did (method, confidence, warnings)
+  const [extractionInfo, setExtractionInfo] = useState<{
+    method: string;
+    confidence: number;
+    warnings: string[];
+    duplicate: boolean;
+    message?: string;
+    stats?: string;
+  } | null>(null);
+  const isSubmittingRef = useRef(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load registered subcontractors
@@ -74,16 +85,30 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
 
   // Upload & Extract Estimate
   const processEstimate = async (fileObj: File | null, rawText?: string) => {
+    if (isSubmittingRef.current) return;
+    const text = (rawText || '').trim();
+
+    if (fileObj && !/\.(pdf|txt)$/i.test(fileObj.name)) {
+      setErrorMsg('Upload the estimate as a PDF or .txt file, or paste the estimate text. Word documents must be exported to PDF first.');
+      return;
+    }
+    if (!fileObj && text.length < 20) {
+      setErrorMsg('Paste at least a few lines of the estimate scope before processing.');
+      return;
+    }
+
+    isSubmittingRef.current = true;
     setIsProcessing(true);
     setErrorMsg(null);
+    setExtractionInfo(null);
     try {
       let base64Data = '';
       let mimeType = 'text/plain';
-      let fileName = 'Estimate.txt';
+      let fileName = 'Estimate_Paste.txt';
 
       if (fileObj) {
         fileName = fileObj.name;
-        mimeType = fileObj.type || (fileName.endsWith('.pdf') ? 'application/pdf' : 'text/plain');
+        mimeType = fileObj.type || (fileName.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'text/plain');
         base64Data = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => {
@@ -94,12 +119,6 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
           reader.onerror = reject;
           reader.readAsDataURL(fileObj);
         });
-      } else if (rawText) {
-        fileName = 'Estimate_Paste.txt';
-        mimeType = 'text/plain';
-        base64Data = btoa(unescape(encodeURIComponent(rawText)));
-      } else {
-        throw new Error('Please select an estimate file or paste text.');
       }
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -112,48 +131,40 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
           pdfBase64: fileObj ? base64Data : '',
           mimeType,
           fileName,
-          textSnippet: rawText || '',
+          textSnippet: text,
           autoCreate: false
         })
       });
 
       const result = extractData;
-      if (!ok || (!result?.success && !result?.data)) {
-        throw new Error(extractError || result?.error || 'Failed to extract estimate information.');
+      if (!ok || !result?.success || !result?.data) {
+        const warnings: string[] = Array.isArray(result?.warnings) ? result.warnings : [];
+        setErrorMsg([extractError || result?.error || 'Failed to extract estimate information.', ...warnings].join(' '));
+        return;
       }
 
       const data: ExtractedJobData = result.data;
-      const job: Job = result.job || {
-        id: `JOB-${Math.floor(100 + Math.random() * 900)}`,
-        customerName: data.insuredName || (data as any).customerName || '',
-        propertyAddress: data.propertyAddress || '',
-        phone: (data as any).phone || '',
-        email: (data as any).email || '',
-        claimNumber: data.claimNumber || '',
-        lossType: data.lossType || '',
-        totalEstimate: data.totalEstimate || '',
-        scopeSummary: data.unitArea || '',
-        extractedTrades: data.tradeBreakdown || [],
-        extractedTasks: data.tasks || [],
-        createdAt: new Date().toISOString(),
-        workOrderIds: []
-      };
+      const job: Job | null = result.job || null;
+
+      if (!job) {
+        setErrorMsg('The estimate was read but no job record was returned. Please retry, or create the job manually.');
+        return;
+      }
 
       setCreatedJob(job);
+      setExtractionInfo({
+        method: data.extractionMethod || result.method || 'extraction',
+        confidence: typeof data.confidence === 'number' ? data.confidence : 0,
+        warnings: Array.isArray(data.warnings) ? data.warnings : (Array.isArray(result.warnings) ? result.warnings : []),
+        duplicate: Boolean(result.duplicate),
+        message: result.message,
+        stats: data.documentStats
+          ? `${data.documentStats.pages} page(s), ${data.documentStats.characters.toLocaleString()} characters read${data.documentStats.hasTextLayer ? '' : ' (no text layer)'}`
+          : undefined
+      });
 
-      // Build Trade Work Order assignment list
-      const tradeList = (data.tradeBreakdown && data.tradeBreakdown.length > 0)
-        ? data.tradeBreakdown
-        : [
-            {
-              tradeName: 'Flooring & Trim Restoration',
-              tasks: (data.tasks || []).slice(0, 4)
-            },
-            {
-              tradeName: 'Carpentry & Detach/Reset',
-              tasks: (data.tasks || []).slice(4, 7)
-            }
-          ];
+      // Build Trade Work Order assignment list strictly from the extracted scope.
+      const tradeList = Array.isArray(data.tradeBreakdown) ? data.tradeBreakdown.filter((tg) => tg.tasks.length > 0) : [];
 
       const initialAssignments = tradeList.map((tg) => {
         const lower = tg.tradeName.toLowerCase();
@@ -163,13 +174,14 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
           (lower.includes('paint') && s.trade.toLowerCase().includes('paint')) ||
           (lower.includes('detach') && s.trade.toLowerCase().includes('detach')) ||
           (lower.includes('carpen') && s.trade.toLowerCase().includes('carpen')) ||
+          (lower.includes('carpent') && s.trade.toLowerCase().includes('carpent')) ||
           (lower.includes('plumb') && s.trade.toLowerCase().includes('plumb')) ||
           (lower.includes('elect') && s.trade.toLowerCase().includes('elect')) ||
           (lower.includes('mechanical') && s.trade.toLowerCase().includes('mechanical')) ||
           (lower.includes('content') && s.trade.toLowerCase().includes('content')) ||
           (lower.includes('demolition') && s.trade.toLowerCase().includes('demo')) ||
           (lower.includes('clean') && s.trade.toLowerCase().includes('clean'))
-        ) || subcontractors[0];
+        );
 
         return {
           tradeName: tg.tradeName,
@@ -181,10 +193,10 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
       });
 
       setTradeAssignments(initialAssignments);
-
     } catch (err: any) {
       setErrorMsg(err.message || 'An error occurred during extraction.');
     } finally {
+      isSubmittingRef.current = false;
       setIsProcessing(false);
     }
   };
@@ -192,7 +204,11 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
   // Create & Dispatch Trade Work Orders
   const handleCreateAllWorkOrders = async () => {
     if (!createdJob) return;
+    if (isCreatingWorkOrders || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setIsCreatingWorkOrders(true);
+    setErrorMsg(null);
+    const failures: string[] = [];
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
@@ -211,9 +227,9 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
           body: JSON.stringify({
             jobId: createdJob.id,
             trade: item.tradeName,
-            unitArea: createdJob.scopeSummary || 'Main Level',
+            unitArea: createdJob.scopeSummary || '',
             assignedSubId: item.subId,
-            subName: sub ? sub.company : 'Assigned Subcontractor',
+            subName: sub ? sub.company : '',
             subPhone: sub ? sub.phone : '',
             scheduledDate: item.scheduledDate,
             tasks: item.tasks
@@ -223,13 +239,23 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
         if (ok && data?.success && data.workOrder) {
           item.isCreated = true;
           item.createdWoId = data.workOrder.woId;
-          await onWorkOrderCreated(data.workOrder);
+          // A duplicate response means this exact scope was already dispatched -
+          // do not add it to the dashboard a second time.
+          if (!data.duplicate) {
+            await onWorkOrderCreated(data.workOrder);
+          }
+        } else {
+          failures.push(`${item.tradeName}: ${data?.error || 'failed to create work order'}`);
         }
       }
 
       setTradeAssignments(updated);
 
-      if (onNavigateToJobsDashboard) {
+      if (failures.length > 0) {
+        setErrorMsg(failures.join(' | '));
+      }
+
+      if (onNavigateToJobsDashboard && failures.length === 0) {
         setTimeout(() => {
           onNavigateToJobsDashboard();
         }, 1200);
@@ -237,6 +263,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
     } catch (err: any) {
       alert('Error creating work orders: ' + err.message);
     } finally {
+      isSubmittingRef.current = false;
       setIsCreatingWorkOrders(false);
     }
   };
@@ -256,6 +283,38 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
         <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 flex items-center gap-2">
           <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
           <span>{errorMsg}</span>
+        </div>
+      )}
+
+      {/* Extraction provenance: what the pipeline actually read */}
+      {extractionInfo && (
+        <div className={`p-3.5 rounded-xl border text-xs space-y-1.5 ${
+          extractionInfo.warnings.length > 0
+            ? 'bg-amber-50 border-amber-200 text-amber-900'
+            : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+        }`}>
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2 font-bold">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              {extractionInfo.duplicate
+                ? 'This estimate was already processed'
+                : extractionInfo.warnings.length > 0
+                  ? 'Estimate read with warnings'
+                  : 'Estimate read successfully'}
+            </span>
+            <span className="font-mono text-[10px] uppercase tracking-wide opacity-80">
+              {extractionInfo.method} · {Math.round(extractionInfo.confidence * 100)}% confidence
+            </span>
+          </div>
+          {extractionInfo.message && <p>{extractionInfo.message}</p>}
+          {extractionInfo.stats && <p className="opacity-80">{extractionInfo.stats}</p>}
+          {extractionInfo.warnings.length > 0 && (
+            <ul className="list-disc list-inside space-y-0.5">
+              {extractionInfo.warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
@@ -286,7 +345,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
             <input
               ref={fileInputRef}
               type="file"
-              accept=".pdf,.txt,.doc,.docx"
+              accept=".pdf,.txt"
               className="hidden"
               onChange={(e) => {
                 if (e.target.files && e.target.files[0]) {
@@ -314,7 +373,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
                   Drop your estimate PDF here or click to browse
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Supports Xactimate, Symbility, PDF, or text estimates
+                  Reads the PDF's own text layer (Xactimate, Symbility, carrier PDFs) or paste the text below. Scanned images are read by AI vision.
                 </p>
               </div>
             )}
@@ -408,6 +467,15 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
             </div>
 
             <div className="space-y-3">
+              {tradeAssignments.length === 0 && (
+                <div className="p-4 rounded-xl border border-amber-200 bg-amber-50 text-xs text-amber-900 space-y-1">
+                  <p className="font-bold">No trade scope could be read from this document.</p>
+                  <p>
+                    Nothing was created and nothing was guessed. Upload a clearer PDF (or paste the line-item scope text) and try again — for example the page that lists items like "Remove 1/2 in. drywall – 120 SF".
+                  </p>
+                </div>
+              )}
+
               {tradeAssignments.map((assignment, idx) => (
                 <div 
                   key={idx}
@@ -495,6 +563,10 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
                 onClick={() => {
                   setCreatedJob(null);
                   setTradeAssignments([]);
+                  setExtractionInfo(null);
+                  setFile(null);
+                  setPasteText('');
+                  setErrorMsg(null);
                 }}
                 className="text-xs text-slate-500 hover:text-slate-800 font-semibold"
               >

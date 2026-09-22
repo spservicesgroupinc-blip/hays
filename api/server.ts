@@ -3,6 +3,13 @@ import path from 'path';
 import crypto from 'crypto';
 import fs from 'fs';
 import { GoogleGenAI, Type } from '@google/genai';
+import {
+  extractEstimate,
+  normalizeDocumentText,
+  nextSequentialId,
+  GENERAL_TRADE,
+  type EstimateExtraction
+} from './estimate-extractor.js';
 
 const app = express();
 const PORT = 3000;
@@ -168,6 +175,12 @@ interface JobRecord {
   extractedTasks?: string[];
   createdAt: string;
   workOrderIds: string[];
+  /** Extraction provenance - lets the PM see how the scope was produced. */
+  sourceHash?: string;
+  extractionMethod?: string;
+  extractionConfidence?: number;
+  extractionWarnings?: string[];
+  documentStats?: { characters: number; pages: number; hasTextLayer: boolean; lookedLikeScan: boolean };
 }
 
 interface WorkOrder {
@@ -188,6 +201,9 @@ interface WorkOrder {
   signedBy?: string;
   signedAt?: string;
   createdBy?: string;
+  /** Hash of the exact task scope so the same scope can never be dispatched twice. */
+  scopeHash?: string;
+  sourceJobId?: string;
 }
 
 interface UserRecord {
@@ -579,7 +595,7 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
           if (!id) continue;
           jobsDb[id] = {
             id,
-            customerName: String(job.customerName || 'Customer'),
+            customerName: String(job.customerName || ''),
             propertyAddress: String(job.propertyAddress || ''),
             phone: String(job.phone || ''),
             email: String(job.email || ''),
@@ -606,11 +622,11 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
             woId: upperWoId,
             jobId: wo.jobId || undefined,
             projectName: wo.projectName || `Work Order ${upperWoId}`,
-            customerName: wo.projectName ? wo.projectName.split(' - ')[0] : 'Customer',
-            propertyAddress: 'Restoration Job Site',
-            trade: wo.trade || 'Restoration Trade',
-            unitArea: wo.unitArea || 'Work Area',
-            subName: wo.subName || 'Subcontractor',
+            customerName: (wo.jobId && jobsDb[wo.jobId] ? jobsDb[wo.jobId].customerName : '') || (wo.projectName ? wo.projectName.split(' - ')[0] : ''),
+            propertyAddress: (wo.jobId && jobsDb[wo.jobId] ? jobsDb[wo.jobId].propertyAddress : '') || wo.propertyAddress || '',
+            trade: wo.trade || GENERAL_TRADE,
+            unitArea: wo.unitArea || 'Restoration Scope',
+            subName: wo.subName || '',
             subPhone: wo.subPhone || '',
             assignedSubId: wo.assignedSubId || '',
             scheduledDate: wo.scheduledDate || '',
@@ -619,7 +635,8 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
             completedItems: Number(wo.completedItems || 0),
             signedBy: wo.signedBy || undefined,
             signedAt: wo.signedAt || undefined,
-            createdBy: 'Project Manager'
+            createdBy: wo.createdBy || 'Project Manager',
+            scopeHash: wo.scopeHash || undefined
           };
           if (wo.jobId && jobsDb[wo.jobId] && !jobsDb[wo.jobId].workOrderIds.includes(upperWoId)) {
             jobsDb[wo.jobId].workOrderIds.push(upperWoId);
@@ -1232,7 +1249,7 @@ app.post('/api/jobs', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Customer name and property address are required' });
   }
 
-  const id = `JOB-${Math.floor(100 + Math.random() * 900)}`;
+  const id = allocateJobId();
   const newJob: JobRecord = {
     id,
     customerName: customerName.trim(),
@@ -1557,105 +1574,131 @@ app.get('/api/pm/activity-feed', (req, res) => {
   });
 });
 
-// Fast text stream extractor for PDF buffers (handles Xactimate, Symbility & raw PDF streams)
-function extractTextFromPdfBuffer(buf: Buffer): string {
-  try {
-    const raw = buf.toString('latin1');
-    const chunks: string[] = [];
+// ---------------------------------------------------------------------------
+// 6d. Estimate scope helpers shared by the extractor and work order routes
+// ---------------------------------------------------------------------------
 
-    // Extract text inside PDF parentheses: (text) Tj or (text)
-    const parenMatches = raw.match(/\(([^()]{2,150})\)/g);
-    if (parenMatches) {
-      for (const m of parenMatches) {
-        const cleaned = m.slice(1, -1).replace(/\\[rntbf\\()]/g, ' ').trim();
-        if (cleaned.length > 2 && /[a-zA-Z0-9]/.test(cleaned)) {
-          chunks.push(cleaned);
-        }
-      }
-    }
-
-    // Extract contiguous printable ASCII runs
-    const asciiMatches = raw.match(/[A-Za-z0-9\s.,/#'"()$%&:;!?-]{6,120}/g);
-    if (asciiMatches) {
-      for (const a of asciiMatches) {
-        const trimmed = a.trim();
-        if (trimmed.length > 5 && /[a-zA-Z]/.test(trimmed)) {
-          chunks.push(trimmed);
-        }
-      }
-    }
-
-    return chunks.join('\n');
-  } catch (e) {
-    return '';
+/** Collapse whitespace, drop blanks and remove duplicate tasks (case/format insensitive). */
+function normalizeTaskList(tasks: unknown): string[] {
+  if (!Array.isArray(tasks)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of tasks) {
+    if (typeof raw !== 'string') continue;
+    const task = raw.replace(/\s{2,}/g, ' ').trim();
+    const key = task.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (task.length < 3 || !key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(task.slice(0, 400));
+    if (out.length >= 120) break;
   }
+  return out;
 }
 
-// Standard seven-trade crew fallback so pasted text and timed-out PDF extraction
-// still produce a complete, assignable trade breakdown for work order creation.
-function buildStandardTradeBreakdown(lossType: string): { tradeName: string; tasks: string[] }[] {
-  const loss = String(lossType || 'Restoration').toLowerCase();
-  const demoTask = loss.includes('fire') || loss.includes('smoke')
-    ? 'Demolish charred/affected building materials and dispose per IICRC standards.'
-    : loss.includes('storm')
-      ? 'Demolish storm-damaged materials and prepare surfaces for rebuild.'
-      : 'Detach, protect and reset affected contents; remove damaged materials.';
-
-  return [
-    {
-      tradeName: 'Contents Handling, Site Protection & Demolition Crew',
-      tasks: [
-        'Inventory, pack and move contents from affected rooms to on-site storage.',
-        'Install dust containment: plastic barriers, tension posts, zipper access and HEPA air scrubbers.',
-        demoTask
-      ]
-    },
-    {
-      tradeName: 'Plumbing & Mechanical Trade Crew',
-      tasks: [
-        'Isolate and verify utilities; detach, cap-off and reset sinks, faucets, angle stops and toilets.',
-        'Disconnect/reconnect water lines and appliances per manufacturer specifications.'
-      ]
-    },
-    {
-      tradeName: 'Electrical Trade Crew',
-      tasks: [
-        'Perform lockout/tagout and verify circuits are de-energized before work.',
-        'Reset junction boxes; replace switches/outlets and reinstall light fixtures to code.'
-      ]
-    },
-    {
-      tradeName: 'Flooring & Underlayment Trade Crew',
-      tasks: [
-        'Verify subfloor is clean, dry and level; install moisture/membrane underlayment.',
-        'Install flooring (tile/LVP/laminate/carpet) per estimate square footage with transition strips and expansion gaps.'
-      ]
-    },
-    {
-      tradeName: 'Finish Carpentry, Doors & Cabinetry Crew',
-      tasks: [
-        'Detach and reset baseboard, casing and rosette blocks; record linear footages.',
-        'Remove/reset door slabs and hardware; install cabinetry, counter, toe kick and hardware.'
-      ]
-    },
-    {
-      tradeName: 'Painting & Surface Finishing Crew',
-      tasks: [
-        'Mask, sand and caulk per scope; protect tape-only areas.',
-        'Apply primer, paint coats and urethane/trim finishes per estimate locations and square footages.'
-      ]
-    },
-    {
-      tradeName: 'Post-Job Cleanup & Debris Removal Crew',
-      tasks: [
-        'Stage dump trailer and haul off construction waste.',
-        'Complete final post-construction cleaning: HEPA vacuum, surface wipe and fixture polish.'
-      ]
-    }
-  ];
+function hashScope(parts: (string | undefined | null)[]): string {
+  return crypto.createHash('sha256').update(parts.filter(Boolean).join('|')).digest('hex').slice(0, 24);
 }
 
-// 6e. AI PDF ESTIMATE EXTRACTOR (Gemini 3.8 Flash Multimodal & Intelligent Fast Parser)
+/**
+ * Scope fingerprint for a work order. Records hydrated from Google Sheets do not
+ * carry `scopeHash`, so it is recomputed from the stored line items - that keeps
+ * duplicate detection working after a cold start.
+ */
+function workOrderScopeHash(wo: WorkOrder): string {
+  if (wo.scopeHash) return wo.scopeHash;
+  const tasks = normalizeTaskList((lineItemsDb[wo.woId] || []).map((item) => item.taskDescription));
+  if (tasks.length === 0) return '';
+  return hashScope([wo.jobId || wo.sourceJobId || '', wo.trade || '', wo.unitArea || '', ...tasks]);
+}
+
+/** Collision-free sequential ids - random ids used to silently overwrite records. */
+function allocateWorkOrderId(): string {
+  return nextSequentialId('WO-', Object.keys(workOrdersDb), 4);
+}
+
+function allocateJobId(): string {
+  return nextSequentialId('JOB-', Object.keys(jobsDb), 4);
+}
+
+function attachWorkOrders(job: JobRecord) {
+  return {
+    ...job,
+    workOrders: job.workOrderIds.map((woId) => workOrdersDb[woId]).filter(Boolean)
+  };
+}
+
+/** Payload shape the PM "Upload Estimate" page consumes. */
+function toExtractedJobPayload(extraction: EstimateExtraction) {
+  return {
+    projectName: extraction.projectName,
+    customerName: extraction.customerName,
+    insuredName: extraction.customerName,
+    propertyAddress: extraction.propertyAddress,
+    phone: extraction.phone,
+    email: extraction.email,
+    claimNumber: extraction.claimNumber,
+    insuranceCarrier: extraction.insuranceCarrier,
+    adjusterName: extraction.adjusterName,
+    lossType: extraction.lossType,
+    dateOfLoss: extraction.dateOfLoss,
+    unitArea: extraction.unitArea,
+    totalEstimate: extraction.totalEstimate,
+    notes: extraction.notes,
+    suggestedTrade: extraction.suggestedTrade,
+    tasks: extraction.tasks,
+    tradeBreakdown: extraction.tradeBreakdown,
+    roomBreakdown: extraction.roomBreakdown,
+    lineItems: extraction.lineItems,
+    confidence: extraction.confidence,
+    warnings: extraction.warnings,
+    extractionMethod: extraction.extractionMethod,
+    source: extraction.source,
+    sourceHash: extraction.sourceHash,
+    documentStats: extraction.documentStats
+  };
+}
+
+/** Rebuild the extraction payload for an estimate that was already processed. */
+function jobToExtractedPayload(job: JobRecord) {
+  return {
+    projectName: `${job.customerName || 'Restoration Job'} - ${job.lossType || 'Restoration'}`,
+    customerName: job.customerName || '',
+    insuredName: job.customerName || '',
+    propertyAddress: job.propertyAddress || '',
+    phone: job.phone || '',
+    email: job.email || '',
+    claimNumber: job.claimNumber || '',
+    insuranceCarrier: '',
+    adjusterName: '',
+    lossType: job.lossType || 'Restoration',
+    dateOfLoss: '',
+    unitArea: job.scopeSummary || '',
+    totalEstimate: job.totalEstimate || '',
+    notes: job.notes || '',
+    suggestedTrade: job.extractedTrades && job.extractedTrades[0] ? job.extractedTrades[0].tradeName : '',
+    tasks: job.extractedTasks || [],
+    tradeBreakdown: job.extractedTrades || [],
+    roomBreakdown: [],
+    lineItems: [],
+    confidence: job.extractionConfidence ?? 0,
+    warnings: job.extractionWarnings || [],
+    extractionMethod: job.extractionMethod || 'stored_extraction',
+    source: 'pdf',
+    sourceHash: job.sourceHash || '',
+    documentStats: job.documentStats
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 6e. ESTIMATE EXTRACTION (real PDF text layer or pasted text -> job scope)
+//
+// The extractor reads the submitted document only: PDF text is unpacked
+// (FlateDecode/ASCII streams, string escapes, ToUnicode CMaps) and the scope
+// rows are mapped onto the seven Hays + Sons crews. AI enrichment is optional
+// and strictly validated - nothing is returned that is not in the document, and
+// re-processing the same estimate reuses the existing job instead of creating
+// another identical batch of work orders.
+// ---------------------------------------------------------------------------
 app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
   try {
     const user = getUserFromRequest(req);
@@ -1666,413 +1709,248 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       return res.status(403).json({ success: false, error: 'Access Denied: Only Project Managers can extract and create jobs from estimates.' });
     }
 
-    const { 
-      pdfBase64, 
-      mimeType, 
-      fileName, 
-      textSnippet, 
-      autoCreate, 
-      assignedSubId, 
-      customSubName, 
-      scheduledDate 
-    } = req.body;
+    const {
+      pdfBase64,
+      mimeType,
+      fileName,
+      textSnippet,
+      autoCreate,
+      assignedSubId,
+      customSubName,
+      scheduledDate
+    } = req.body || {};
 
     // Accept both legacy client field names (base64/rawText) and the current
     // names (pdfBase64/textSnippet) so the PM Upload Estimate page never fails.
-    const resolvedBase64 = (pdfBase64 || req.body.base64 || '').toString().trim();
-    const resolvedText = (textSnippet || req.body.rawText || req.body.text || '').toString().trim();
+    const resolvedBase64 = (pdfBase64 || req.body?.base64 || '').toString().trim();
+    const resolvedText = (textSnippet || req.body?.rawText || req.body?.text || '').toString().trim();
 
     if (!resolvedBase64 && !resolvedText) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Please upload an estimate PDF or enter estimate text to extract project scope.' 
-      });
-    }
-
-    let extractedData: any = null;
-    let extractionMethod = 'ai_parser';
-
-    // 1. Extract text from base64 if provided
-    let pdfTextExtracted = '';
-    let cleanBase64 = '';
-    if (resolvedBase64) {
-      cleanBase64 = resolvedBase64.includes('base64,') ? resolvedBase64.split('base64,')[1] : resolvedBase64;
-      try {
-        const buffer = Buffer.from(cleanBase64, 'base64');
-        pdfTextExtracted = extractTextFromPdfBuffer(buffer);
-      } catch (bufErr) {
-        console.warn('Buffer conversion notice:', bufErr);
-      }
-    }
-
-    const combinedText = `${resolvedText}\n${pdfTextExtracted}\n${fileName || ''}`.trim();
-
-    // 2. If Gemini 3.8 Flash is available, try AI multimodal extraction with timeout
-    if (!extractedData && process.env.GEMINI_API_KEY && (cleanBase64 || resolvedText)) {
-      try {
-        const effectiveMime = (mimeType && mimeType.includes('pdf')) 
-          ? 'application/pdf' 
-          : (mimeType || 'application/pdf');
-
-        const ai = getGenAI();
-        const prompt = `You are a Senior Project Manager & Restoration Estimator at Hays + Sons Complete Restoration.
-Analyze the submitted restoration insurance estimate (Xactimate, Symbility, contractor bid, or pasted estimate text).
-Extract the customer/job details and translate the full scope into actionable, verifiable line-item tasks organized under the seven standard Hays + Sons trade crews below.
-
-CUSTOMER & JOB DATA (must be filled from the estimate so the job can be created):
-- customerName: insured/client/homeowner name (fall back to insuredName when available).
-- propertyAddress: the jobsite location/address.
-- phone and email: the insured/customer contact details when present.
-- claimNumber, lossType, unitArea, totalEstimate, notes.
-
-THE SEVEN STANDARD TRADE CREWS (use these exact names in tradeBreakdown):
-1. "Contents Handling, Site Protection & Demolition Crew" — per-room contents handling/moving instructions; dust containment setup (plastic barriers, tension posts, zipper access, air scrubbers); tear-out and surface prep (flooring removal, subfloor prep, concrete grinding).
-2. "Plumbing & Mechanical Trade Crew" — utility isolation and safety; detach, cap-off, and reset instructions for sinks, faucets, angle stops, toilets, water lines, and appliances.
-3. "Electrical Trade Crew" — lockout/tagout and code compliance; rewiring, junction box resets, switch/outlet replacements, and light fixture installations.
-4. "Flooring & Underlayment Trade Crew" — subfloor cleanliness inspection and moisture/membrane underlayment installation; exact square footages for tile, LVP, laminate, or carpet by room; transition strip locations and perimeter expansion gap requirements.
-5. "Finish Carpentry, Doors & Cabinetry Crew" — door slab/frame removal, door hardware installation, sidelite adjustments; baseboard, casing, and rosette block detach/reset instructions with exact linear footages; cabinetry, counter, toe kick, and hardware installation.
-6. "Painting & Surface Finishing Crew" — masking and surface prep (sanding, caulking, tape-only areas); exact locations and linear/square footages for primer, paint coats, urethane wood finishes, and trim staining.
-7. "Post-Job Cleanup & Debris Removal Crew" — dump trailer staging and construction waste haul-off; final post-construction cleaning (HEPA vacuuming, surface wiping, fixture polishing).
-
-Only include a crew when the estimate contains work for that discipline. For each crew, write 1-6 specific, concise, photo-verifiable line items with measurements (LF, SF, EA) where the estimate states them.
-
-ALSO RETURN:
-- tasks: the same line items flattened across all crews (6 to 20 items) for the subcontractor photo checklist.
-- roomBreakdown: { roomName, tasks[] } grouping items by room/location where possible.
-- suggestedTrade: the single most prominent trade discipline for dispatch.
-
-Return JSON strictly adhering to this schema.`;
-
-        // AI multimodal/text extraction with an 8 second timeout safeguard
-        const geminiCall = ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: [
-            ...(cleanBase64
-              ? [{
-                  inlineData: {
-                    mimeType: effectiveMime,
-                    data: cleanBase64
-                  }
-                }]
-              : []),
-            ...(resolvedText
-              ? [{ text: `--- ESTIMATE TEXT ---\n${resolvedText.slice(0, 60000)}` }]
-              : []),
-            { text: prompt }
-          ],
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                projectName: { type: Type.STRING },
-                customerName: { type: Type.STRING },
-                propertyAddress: { type: Type.STRING },
-                insuredName: { type: Type.STRING },
-                claimNumber: { type: Type.STRING },
-                phone: { type: Type.STRING },
-                email: { type: Type.STRING },
-                lossType: { type: Type.STRING },
-                unitArea: { type: Type.STRING },
-                suggestedTrade: { type: Type.STRING },
-                tasks: { type: Type.ARRAY, items: { type: Type.STRING } },
-                tradeBreakdown: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      tradeName: { type: Type.STRING },
-                      tasks: { type: Type.ARRAY, items: { type: Type.STRING } }
-                    },
-                    required: ['tradeName', 'tasks']
-                  }
-                },
-                roomBreakdown: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      roomName: { type: Type.STRING },
-                      tasks: { type: Type.ARRAY, items: { type: Type.STRING } }
-                    },
-                    required: ['roomName', 'tasks']
-                  }
-                },
-                totalEstimate: { type: Type.STRING },
-                notes: { type: Type.STRING }
-              },
-              required: ['projectName', 'tasks', 'tradeBreakdown']
-            }
-          }
-        });
-
-        // 8 second timeout safeguard (still leaves room for the fallback parser
-        // and job creation before serverless function limits).
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Gemini call timed out')), 8000)
-        );
-
-        const response = await Promise.race([geminiCall, timeoutPromise]) as any;
-        if (response && response.text) {
-          const parsed = JSON.parse(response.text.trim());
-          const hasTasks = Array.isArray(parsed.tasks) && parsed.tasks.length > 0;
-          const hasTrades = Array.isArray(parsed.tradeBreakdown) && parsed.tradeBreakdown.length > 0;
-          if (parsed && parsed.projectName && (hasTasks || hasTrades)) {
-            extractedData = parsed;
-            extractionMethod = 'gemini_3.8_flash';
-          }
-        }
-      } catch (geminiErr: any) {
-        console.warn('Gemini extraction bypassed/timed out:', geminiErr.message);
-      }
-    }
-
-    // Normalize extracted data so downstream code always receives arrays.
-    if (extractedData) {
-      extractedData.tasks = Array.isArray(extractedData.tasks) ? extractedData.tasks : [];
-      extractedData.tradeBreakdown = Array.isArray(extractedData.tradeBreakdown) ? extractedData.tradeBreakdown : [];
-      extractedData.roomBreakdown = Array.isArray(extractedData.roomBreakdown) ? extractedData.roomBreakdown : [];
-    }
-
-    // 5. Intelligent regex pattern fallback from combinedText if still null
-    if (!extractedData) {
-      const insuredMatch = combinedText.match(/(?:Insured|Customer|Client)[:\s]+([A-Za-z0-9\s.'-]+?)(?=\s+(?:Home|Cell|Business|Property|Claim|Phone|Email|E-mail)|[\r\n]|$)/i);
-      const propertyMatch = combinedText.match(/(?:Property|Address|Job Address|Location)[:\s]+([A-Za-z0-9\s.,'#-]+?)(?=\s+(?:Email|E-mail|Claim|Home|Business)|[\r\n]|$)/i);
-      const claimMatch = combinedText.match(/(?:Claim Number|Claim #|Claim|Estimate)[:\s]+([A-Za-z0-9\-_]+)/i);
-      const lossMatch = combinedText.match(/(?:Type of Loss|Loss Type|Cause of Loss)[:\s]+([A-Za-z0-9\s/]+?)(?=\s+[A-Z]|[\r\n]|$)/i);
-      const totalMatch = combinedText.match(/(?:Total|Replacement Cost Value|Net Claim|Grand Total)[:\s$]*([0-9,]+\.\d{2})/i);
-      const phoneMatch = combinedText.match(/(?:Phone|Tel|Mobile|Cell)[:\s]*([+()0-9\s.-]{7,20})/i);
-      const emailMatch = combinedText.match(/(?:Email|E-mail)[:\s]*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
-
-      const cleanedFileName = (fileName || 'Restoration_Job')
-        .replace(/\.pdf$/i, '')
-        .replace(/[-_]/g, ' ');
-
-      const insured = insuredMatch ? insuredMatch[1].trim() : (cleanedFileName || 'Property Owner');
-      const property = propertyMatch ? propertyMatch[1].trim() : 'Job Site Address';
-      const claim = claimMatch ? claimMatch[1].trim() : 'Pending Claim #';
-      const loss = lossMatch ? lossMatch[1].trim() : 'Restoration';
-      const total = totalMatch ? `$${totalMatch[1]}` : 'TBD';
-
-      const fallbackTradeBreakdown = buildStandardTradeBreakdown(loss);
-
-      extractedData = {
-        projectName: `${insured} - ${loss}`,
-        customerName: insured,
-        propertyAddress: property,
-        insuredName: insured,
-        phone: phoneMatch ? phoneMatch[1].trim() : '',
-        email: emailMatch ? emailMatch[1].trim() : '',
-        claimNumber: claim,
-        lossType: loss,
-        unitArea: 'Primary Work Area',
-        suggestedTrade: 'General Restoration',
-        totalEstimate: total,
-        notes: 'Line-item restoration scope extracted from submitted estimate. Subcontractor photo verification required for each item before sign-off.',
-        tasks: fallbackTradeBreakdown.flatMap((t: any) => t.tasks),
-        tradeBreakdown: fallbackTradeBreakdown,
-        roomBreakdown: []
-      };
-      extractionMethod = 'regex_pattern_engine';
-    }
-
-    if (autoCreate && (!Array.isArray(extractedData.tasks) || extractedData.tasks.length === 0)) {
       return res.status(400).json({
         success: false,
-        error: 'No line-item tasks could be extracted from this estimate. Please review the document or enter the scope manually before auto-dispatching a work order.'
+        error: 'Please upload an estimate PDF or paste the estimate text to extract the project scope.'
       });
     }
 
-    // 6. ALWAYS CREATE THE JOB FROM THE EXTRACTED ESTIMATE
-    const jobId = `JOB-${Math.floor(100 + Math.random() * 900)}`;
-    const custName = extractedData.insuredName || extractedData.customerName || extractedData.projectName || '';
-    const propAddr = extractedData.propertyAddress || '';
+    const approxBytes = Math.ceil(resolvedBase64.replace(/\s+/g, '').length * 0.75);
+    if (approxBytes > 20 * 1024 * 1024) {
+      return res.status(413).json({
+        success: false,
+        error: 'That estimate file is larger than the 20 MB limit. Upload the scope pages only or paste the text.'
+      });
+    }
+
+    const extraction = await extractEstimate({
+      pdfBase64: resolvedBase64 || undefined,
+      mimeType: mimeType || undefined,
+      textSnippet: resolvedText || undefined,
+      fileName: fileName || undefined,
+      apiKey: process.env.GEMINI_API_KEY,
+      model: process.env.GEMINI_MODEL,
+      timeoutMs: process.env.AI_EXTRACT_TIMEOUT_MS ? Number(process.env.AI_EXTRACT_TIMEOUT_MS) : undefined
+    });
+
+    const data = toExtractedJobPayload(extraction);
+    const canAutoCreate = Boolean(autoCreate);
+
+    // Idempotency: the same document must never produce a second job or a second
+    // identical batch of work orders.
+    const existingJob = !req.body?.forceNew
+      ? Object.values(jobsDb).find((job) => job.sourceHash && job.sourceHash === extraction.sourceHash)
+      : undefined;
+
+    if (existingJob) {
+      return res.json({
+        success: true,
+        duplicate: true,
+        method: existingJob.extractionMethod || extraction.extractionMethod,
+        data: jobToExtractedPayload(existingJob),
+        job: attachWorkOrders(existingJob),
+        autoCreated: existingJob.workOrderIds.length > 0,
+        workOrder: existingJob.workOrderIds.map((woId) => workOrdersDb[woId]).filter(Boolean)[0] || null,
+        lineItems: existingJob.workOrderIds.flatMap((woId) => lineItemsDb[woId] || []),
+        message: `This estimate was already processed as Job #${existingJob.id} with ${existingJob.workOrderIds.length} work order(s). Reusing the existing job instead of creating duplicates.`
+      });
+    }
+
+    if (extraction.tasks.length === 0) {
+      return res.status(422).json({
+        success: false,
+        method: extraction.extractionMethod,
+        error: extraction.warnings[0]
+          || 'No line-item scope could be read from this document. Paste the estimate scope text or upload the digital PDF export.',
+        data,
+        warnings: extraction.warnings
+      });
+    }
+
+    // Create the job from the extracted (document-sourced) scope.
+    const jobId = allocateJobId();
+    const custName = extraction.customerName || extraction.propertyAddress || 'Property Owner';
 
     const createdJob: JobRecord = {
       id: jobId,
       customerName: custName,
-      propertyAddress: propAddr,
-      phone: (extractedData as any).phone || '',
-      email: (extractedData as any).email || '',
-      claimNumber: extractedData.claimNumber || `CLM-${Math.floor(100000 + Math.random() * 900000)}`,
-      lossType: extractedData.lossType || 'Restoration',
-      totalEstimate: extractedData.totalEstimate || '',
-      notes: extractedData.notes || '',
-      scopeSummary: extractedData.unitArea || 'Restoration Scope',
-      extractedTrades: extractedData.tradeBreakdown || [],
-      extractedTasks: extractedData.tasks || [],
+      propertyAddress: extraction.propertyAddress,
+      phone: extraction.phone,
+      email: extraction.email,
+      claimNumber: extraction.claimNumber,
+      lossType: extraction.lossType || 'Restoration',
+      totalEstimate: extraction.totalEstimate,
+      notes: extraction.notes,
+      scopeSummary: extraction.unitArea || 'Restoration Scope',
+      extractedTrades: extraction.tradeBreakdown,
+      extractedTasks: extraction.tasks,
       createdAt: new Date().toISOString(),
-      workOrderIds: []
+      workOrderIds: [],
+      sourceHash: extraction.sourceHash,
+      extractionMethod: extraction.extractionMethod,
+      extractionConfidence: extraction.confidence,
+      extractionWarnings: extraction.warnings,
+      documentStats: extraction.documentStats
     };
 
     jobsDb[jobId] = createdJob;
 
-    // 7. AUTOMATIC WORK ORDER DISPATCH (If autoCreate is requested)
+    // Optional one-shot dispatch of every trade group on the job.
     let createdWorkOrder: WorkOrder | null = null;
     let createdLineItems: LineItem[] = [];
 
-    if (autoCreate) {
+    if (canAutoCreate) {
+      const suggestedLower = (extraction.suggestedTrade || '').toLowerCase();
       let resolvedSubId = assignedSubId;
       let resolvedSubName = customSubName;
       let resolvedSubPhone = '';
 
-      // Auto-match best trade subcontractor if not pre-assigned
+      const subList = Object.values(usersDb).filter((u) => u.role === 'subcontractor');
       if (!resolvedSubId || resolvedSubId === 'custom') {
-        const subList = Object.values(usersDb).filter(u => u.role === 'subcontractor');
-        const suggestedLower = (extractedData.suggestedTrade || '').toLowerCase();
-        
-        const matched = subList.find(s => 
-          (suggestedLower.includes('floor') && s.trade.toLowerCase().includes('floor')) ||
-          (suggestedLower.includes('drywall') && s.trade.toLowerCase().includes('drywall')) ||
-          (suggestedLower.includes('paint') && s.trade.toLowerCase().includes('paint')) ||
-          (suggestedLower.includes('plumb') && s.trade.toLowerCase().includes('plumb')) ||
-          (suggestedLower.includes('elect') && s.trade.toLowerCase().includes('elect'))
-        ) || subList[0];
+        const matched = subList.find((s) => {
+          const trade = String(s.trade || '').toLowerCase();
+          if (!trade) return false;
+          if (suggestedLower.includes('plumb') && trade.includes('plumb')) return true;
+          if (suggestedLower.includes('elect') && trade.includes('elect')) return true;
+          if (suggestedLower.includes('floor') && trade.includes('floor')) return true;
+          if (suggestedLower.includes('paint') && trade.includes('paint')) return true;
+          if (suggestedLower.includes('clean') && trade.includes('clean')) return true;
+          if (suggestedLower.includes('carpent') && trade.includes('carpent')) return true;
+          if ((suggestedLower.includes('content') || suggestedLower.includes('demolition')) && (trade.includes('content') || trade.includes('demo'))) return true;
+          return false;
+        });
 
         if (matched) {
           resolvedSubId = matched.id;
           resolvedSubName = matched.company || matched.name;
           resolvedSubPhone = matched.phone || '';
-        } else {
-          resolvedSubName = customSubName || '';
-          resolvedSubPhone = '';
+        } else if (!resolvedSubName) {
+          delete jobsDb[jobId];
+          saveDatabaseState();
+          return res.status(409).json({
+            success: false,
+            method: extraction.extractionMethod,
+            error: 'No matching subcontractor was found for this scope. Add a subcontractor account for the trade, then dispatch the work order.',
+            data,
+            warnings: extraction.warnings
+          });
         }
-      } else {
+      } else if (usersDb[resolvedSubId]) {
         const subUser = usersDb[resolvedSubId];
-        if (subUser) {
-          resolvedSubName = subUser.company || subUser.name;
-          resolvedSubPhone = subUser.phone || '';
-        }
+        resolvedSubName = subUser.company || subUser.name;
+        resolvedSubPhone = subUser.phone || '';
       }
 
-      if (!resolvedSubName) {
-        delete jobsDb[jobId];
-        saveDatabaseState();
-        return res.status(400).json({
-          success: false,
-          error: 'No matching subcontractor was found. Create a subcontractor account first, then retry auto-dispatch.'
-        });
-      }
+      const tasks = normalizeTaskList(extraction.tasks);
+      const woId = allocateWorkOrderId();
+      const scheduled = scheduledDate || new Date().toISOString().split('T')[0];
 
-      // Generate Work Order ID
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
-      let woId = `WO-${randomNum}`;
-
-      // Synchronize with Google Sheets in background (non-blocking)
-      callAppsScript('createWorkOrder', {
-        project: extractedData.projectName,
-        unit: extractedData.unitArea || '',
-        subName: resolvedSubName,
-        subPhone: resolvedSubPhone,
-        subEmail: resolvedSubId && usersDb[resolvedSubId] ? usersDb[resolvedSubId].email : '',
-        date: scheduledDate || new Date().toISOString().split('T')[0],
-        tasks: extractedData.tasks
-      }).then(gasResult => {
-        if (gasResult && gasResult.success && gasResult.woId) {
-          console.log('Google Sheets synced WO:', gasResult.woId);
-        }
-      }).catch(err => {
-        console.warn('Apps Script background sync notice:', err.message);
-      });
-
-      // Construct WorkOrder linked to Job
       createdWorkOrder = {
         woId,
         jobId,
-        projectName: extractedData.projectName,
+        projectName: `${custName} - ${extraction.suggestedTrade || extraction.lossType || 'Restoration'}`,
         customerName: custName,
-        propertyAddress: propAddr,
-        trade: extractedData.suggestedTrade || 'General Restoration',
-        unitArea: extractedData.unitArea,
-        subName: resolvedSubName,
+        propertyAddress: extraction.propertyAddress,
+        trade: extraction.suggestedTrade || GENERAL_TRADE,
+        unitArea: extraction.unitArea || 'Restoration Scope',
+        subName: resolvedSubName || 'Unassigned Subcontractor',
         subPhone: resolvedSubPhone,
         assignedSubId: resolvedSubId,
-        scheduledDate: scheduledDate || new Date().toISOString().split('T')[0],
+        scheduledDate: scheduled,
         status: 'Open',
-        totalItems: extractedData.tasks.length,
+        totalItems: tasks.length,
         completedItems: 0,
-        createdBy: user.name
+        createdBy: user.name,
+        scopeHash: hashScope([jobId, extraction.suggestedTrade, ...tasks]),
+        sourceJobId: jobId
       };
 
-      // Construct LineItems
-      createdLineItems = extractedData.tasks.map((taskDesc: string, idx: number) => ({
-        lineId: `${woId}-L${idx + 1 < 10 ? '0' + (idx + 1) : (idx + 1)}`,
+      createdLineItems = tasks.map((taskDescription, idx) => ({
+        lineId: `${woId}-L${String(idx + 1).padStart(2, '0')}`,
         woId,
-        taskDescription: taskDesc,
+        taskDescription,
         status: 'Pending' as const,
         photoUrl: '',
         notes: '',
         timestamp: ''
       }));
 
-      // Store in memory DB
       workOrdersDb[woId] = createdWorkOrder;
       lineItemsDb[woId] = createdLineItems;
       createdJob.workOrderIds.push(woId);
 
-      // Assign to user if registered sub
-      if (resolvedSubId && usersDb[resolvedSubId]) {
-        if (!usersDb[resolvedSubId].assignedWoIds.includes(woId)) {
-          usersDb[resolvedSubId].assignedWoIds.push(woId);
-        }
+      if (resolvedSubId && usersDb[resolvedSubId] && !usersDb[resolvedSubId].assignedWoIds.includes(woId)) {
+        usersDb[resolvedSubId].assignedWoIds.push(woId);
       }
 
       saveDatabaseState();
 
-      // Record activity event
+      // Synchronize with Google Sheets in background (non-blocking).
+      callAppsScript('createWorkOrder', {
+        jobId,
+        woId,
+        project: createdWorkOrder.projectName,
+        trade: createdWorkOrder.trade,
+        assignedSubId: resolvedSubId || '',
+        unit: createdWorkOrder.unitArea,
+        subName: createdWorkOrder.subName,
+        subPhone: resolvedSubPhone,
+        subEmail: resolvedSubId && usersDb[resolvedSubId] ? usersDb[resolvedSubId].email : '',
+        date: scheduled,
+        tasks
+      }).catch((err: any) => {
+        console.warn('Apps Script background sync notice:', err.message);
+      });
+
       activityLogsDb.unshift({
         id: `act_${Date.now()}`,
         timestamp: new Date().toISOString(),
         type: 'wo_created',
         subId: resolvedSubId,
-        subName: resolvedSubName,
-        company: resolvedSubName,
+        subName: createdWorkOrder.subName,
+        company: createdWorkOrder.subName,
         woId,
-        projectName: extractedData.projectName,
-        notes: `Estimate extracted: Job #${jobId} created and Work Order #${woId} assigned to ${resolvedSubName}.`
+        projectName: createdWorkOrder.projectName,
+        notes: `Extracted ${tasks.length} scope items from ${fileName || 'estimate'}: Job #${jobId} created and Work Order #${woId} assigned to ${createdWorkOrder.subName}.`
       });
+    } else {
+      saveDatabaseState();
     }
 
-    // Return response with extracted data, created job, and autoCreated work order
     res.json({
       success: true,
-      method: extractionMethod,
-      data: extractedData,
-      job: {
-        ...createdJob,
-        workOrders: createdJob.workOrderIds.map(id => workOrdersDb[id]).filter(Boolean)
-      },
-      autoCreated: !!createdWorkOrder,
+      duplicate: false,
+      method: extraction.extractionMethod,
+      confidence: extraction.confidence,
+      warnings: extraction.warnings,
+      data,
+      job: attachWorkOrders(createdJob),
+      autoCreated: Boolean(createdWorkOrder),
       workOrder: createdWorkOrder,
       lineItems: createdLineItems
     });
-
   } catch (err: any) {
-    console.error('Extract job from PDF fatal error:', err);
-    // Never return raw 500 error - return robust fallback so app never breaks
-    res.json({
-      success: true,
-      method: 'resilient_recovery',
-      data: {
-        projectName: 'Restoration Scope & Line Items',
-        propertyAddress: '909 Production Road, Fort Wayne, IN 46808',
-        insuredName: 'Property Owner',
-        claimNumber: `CLM-${Math.floor(100000 + Math.random() * 900000)}`,
-        lossType: 'Water Damage',
-        unitArea: 'Main Level Area',
-        suggestedTrade: 'Flooring & Trim Restoration',
-        totalEstimate: '$14,500.00',
-        tasks: [
-          'Detach & reset baseboard without affecting walls',
-          'Remove water-damaged vinyl plank flooring and underlayment',
-          'Install sound/crack membrane underlayment across floor',
-          'Install premium vinyl plank (LVP) flooring with tight seams',
-          'Mask and prep for paint along baseboard perimeter',
-          'Paint baseboard with one coat finish paint',
-          'Disconnect & reconnect appliance water lines and reset appliances',
-          'Final post-construction cleaning and debris removal'
-        ]
-      }
+    console.error('Estimate extraction error:', err);
+    res.status(500).json({
+      success: false,
+      error: `Estimate extraction failed: ${String(err?.message || err).slice(0, 300)}`
     });
   }
 });
@@ -2135,53 +2013,69 @@ app.post('/api/work-orders', async (req, res) => {
       });
     }
 
-    const { jobId, projectName, customerName, propertyAddress, trade, unitArea, subName, subPhone, scheduledDate, tasks, assignedSubId } = req.body;
-    if ((!projectName && !jobId) || !Array.isArray(tasks) || tasks.length === 0) {
-      return res.status(400).json({ success: false, error: 'Project name/Job and at least 1 task are required.' });
-    }
+    const {
+      jobId,
+      projectName,
+      customerName,
+      propertyAddress,
+      trade,
+      unitArea,
+      subName,
+      subPhone,
+      scheduledDate,
+      tasks,
+      assignedSubId,
+      force
+    } = req.body || {};
 
-    let randomNum = Math.floor(1000 + Math.random() * 9000);
-    let woId = `WO-${randomNum}`;
-
-    let resolvedSubId = assignedSubId;
-    // Auto-link to existing subcontractor user if matched by name or phone
-    if (!resolvedSubId) {
-      const matchedSub = Object.values(usersDb).find(u => 
-        u.role === 'subcontractor' && (
-          (subPhone && u.phone && u.phone.replace(/\D/g, '') === subPhone.replace(/\D/g, '')) ||
-          (subName && u.company.toLowerCase().trim() === subName.toLowerCase().trim())
-        )
-      );
-      if (matchedSub) {
-        resolvedSubId = matchedSub.id;
-      }
+    const cleanTasks = normalizeTaskList(tasks);
+    if ((!projectName && !jobId) || cleanTasks.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'A project (job) and at least 1 task are required to create a work order.'
+      });
     }
 
     const linkedJob = jobId && jobsDb[jobId] ? jobsDb[jobId] : null;
-    const finalCustomerName = customerName || (linkedJob ? linkedJob.customerName : 'Customer');
+    const finalCustomerName = customerName || (linkedJob ? linkedJob.customerName : '');
     const finalAddress = propertyAddress || (linkedJob ? linkedJob.propertyAddress : '');
-    const finalProjectName = projectName || (linkedJob ? `${linkedJob.customerName} - ${trade || 'Scope'}` : 'Restoration Work Order');
+    const finalTrade = trade || GENERAL_TRADE;
+    const finalProjectName = projectName
+      || (finalCustomerName ? `${finalCustomerName} - ${finalTrade}` : `Work Order ${finalTrade}`);
+    const finalUnit = unitArea || (linkedJob ? linkedJob.scopeSummary : '') || 'Restoration Scope';
+    const scheduled = scheduledDate || new Date().toISOString().split('T')[0];
 
-    // Synchronize with Google Sheets database tabs (WorkOrders and LineItems)
-    try {
-      const gasResult = await callAppsScript('createWorkOrder', {
-        jobId: jobId || '',
-        project: finalProjectName,
-        trade: trade || 'General Trade',
-        assignedSubId: resolvedSubId || '',
-        unit: unitArea || 'General Area',
-        subName: subName || 'Assigned Subcontractor',
-        subPhone: subPhone || '',
-        subEmail: resolvedSubId && usersDb[resolvedSubId] ? usersDb[resolvedSubId].email : '',
-        date: scheduledDate || new Date().toISOString().split('T')[0],
-        tasks: tasks
-      });
-      if (gasResult && gasResult.success && gasResult.woId) {
-        woId = gasResult.woId;
+    // Idempotency: dispatching the identical scope twice returns the existing work
+    // order instead of appending a duplicate (this is what used to look like the
+    // app "reloading the same fake work order").
+    const scopeHash = hashScope([jobId || '', finalTrade, finalUnit, ...cleanTasks]);
+    if (!force) {
+      const duplicate = Object.values(workOrdersDb).find((wo) => workOrderScopeHash(wo) === scopeHash);
+      if (duplicate) {
+        return res.json({
+          success: true,
+          duplicate: true,
+          woId: duplicate.woId,
+          workOrder: duplicate,
+          lineItems: lineItemsDb[duplicate.woId] || [],
+          message: `This exact scope is already dispatched as Work Order #${duplicate.woId}.`
+        });
       }
-    } catch (gasErr: any) {
-      console.warn('Apps Script createWorkOrder sync notice:', gasErr.message);
     }
+
+    let resolvedSubId = assignedSubId;
+    // Auto-link to an existing subcontractor account by name or phone.
+    if (!resolvedSubId) {
+      const matchedSub = Object.values(usersDb).find((u) =>
+        u.role === 'subcontractor' && (
+          (subPhone && u.phone && u.phone.replace(/\D/g, '') === String(subPhone).replace(/\D/g, '')) ||
+          (subName && String(u.company || '').toLowerCase().trim() === String(subName).toLowerCase().trim())
+        )
+      );
+      if (matchedSub) resolvedSubId = matchedSub.id;
+    }
+
+    const woId = allocateWorkOrderId();
 
     const newWo: WorkOrder = {
       woId,
@@ -2189,20 +2083,22 @@ app.post('/api/work-orders', async (req, res) => {
       projectName: finalProjectName,
       customerName: finalCustomerName,
       propertyAddress: finalAddress,
-      trade: trade || 'General Trade',
-      unitArea: unitArea || 'General Area',
-      subName: subName || 'Assigned Subcontractor',
-      subPhone: subPhone || '',
+      trade: finalTrade,
+      unitArea: finalUnit,
+      subName: subName || (resolvedSubId && usersDb[resolvedSubId] ? usersDb[resolvedSubId].company : '') || 'Unassigned Subcontractor',
+      subPhone: subPhone || (resolvedSubId && usersDb[resolvedSubId] ? usersDb[resolvedSubId].phone || '' : ''),
       assignedSubId: resolvedSubId,
-      scheduledDate: scheduledDate || new Date().toISOString().split('T')[0],
+      scheduledDate: scheduled,
       status: 'Open',
-      totalItems: tasks.length,
+      totalItems: cleanTasks.length,
       completedItems: 0,
-      createdBy: user.name
+      createdBy: user.name,
+      scopeHash,
+      sourceJobId: jobId || undefined
     };
 
-    const newLines: LineItem[] = tasks.map((taskDesc: string, idx: number) => ({
-      lineId: `${woId}-L${idx + 1 < 10 ? '0' + (idx + 1) : (idx + 1)}`,
+    const newLines: LineItem[] = cleanTasks.map((taskDesc, idx) => ({
+      lineId: `${woId}-L${String(idx + 1).padStart(2, '0')}`,
       woId,
       taskDescription: taskDesc,
       status: 'Pending',
@@ -2213,19 +2109,34 @@ app.post('/api/work-orders', async (req, res) => {
     workOrdersDb[woId] = newWo;
     lineItemsDb[woId] = newLines;
 
-    // Link to Job if provided
     if (linkedJob && !linkedJob.workOrderIds.includes(woId)) {
       linkedJob.workOrderIds.push(woId);
     }
 
-    // Link WO to the assigned subcontractor if present
-    if (resolvedSubId && usersDb[resolvedSubId]) {
-      if (!usersDb[resolvedSubId].assignedWoIds.includes(woId)) {
-        usersDb[resolvedSubId].assignedWoIds.push(woId);
-      }
+    if (resolvedSubId && usersDb[resolvedSubId] && !usersDb[resolvedSubId].assignedWoIds.includes(woId)) {
+      usersDb[resolvedSubId].assignedWoIds.push(woId);
     }
 
     saveDatabaseState();
+
+    // Synchronize with Google Sheets database tabs (WorkOrders and LineItems).
+    try {
+      await callAppsScript('createWorkOrder', {
+        jobId: jobId || '',
+        woId,
+        project: finalProjectName,
+        trade: finalTrade,
+        assignedSubId: resolvedSubId || '',
+        unit: finalUnit,
+        subName: newWo.subName,
+        subPhone: newWo.subPhone,
+        subEmail: resolvedSubId && usersDb[resolvedSubId] ? usersDb[resolvedSubId].email : '',
+        date: scheduled,
+        tasks: cleanTasks
+      });
+    } catch (gasErr: any) {
+      console.warn('Apps Script createWorkOrder sync notice:', gasErr.message);
+    }
 
     // Record real-time event for PM & Subcontractor streams
     const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -2238,7 +2149,7 @@ app.post('/api/work-orders', async (req, res) => {
       company: newWo.subName,
       woId,
       projectName: newWo.projectName,
-      taskDescription: `Dispatched ${newLines.length} tasks to ${newWo.subName} (${unitArea || 'General Area'})`,
+      taskDescription: `Dispatched ${newLines.length} tasks to ${newWo.subName} (${finalUnit})`,
       notes: `Created by ${user.name}`
     });
 
@@ -2248,12 +2159,14 @@ app.post('/api/work-orders', async (req, res) => {
 
     res.json({
       success: true,
+      duplicate: false,
       woId,
       magicLink,
       workOrder: newWo,
       lineItems: newLines
     });
   } catch (err: any) {
+    console.error('Create work order error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

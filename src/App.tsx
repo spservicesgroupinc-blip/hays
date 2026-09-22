@@ -295,7 +295,11 @@ export default function App() {
 
   // Called when PM creates a new work order
   const handleWorkOrderCreated = async (newWo: WorkOrder) => {
-    setWorkOrders(prev => [newWo, ...prev]);
+    setWorkOrders(prev => (
+      prev.some(w => w.woId === newWo.woId)
+        ? prev.map(w => (w.woId === newWo.woId ? newWo : w))
+        : [newWo, ...prev]
+    ));
     setSelectedWoId(newWo.woId);
     setCurrentWorkOrder(newWo);
     await loadWorkOrdersList(authToken, newWo.woId);

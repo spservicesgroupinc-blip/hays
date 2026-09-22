@@ -80,6 +80,19 @@ export interface Job {
   createdAt: string;
   workOrderIds: string[];
   workOrders?: WorkOrder[];
+  /** Provenance from the estimate extraction pipeline. */
+  sourceHash?: string;
+  extractionMethod?: string;
+  extractionConfidence?: number;
+  extractionWarnings?: string[];
+  documentStats?: DocumentStats;
+}
+
+export interface DocumentStats {
+  characters: number;
+  pages: number;
+  hasTextLayer: boolean;
+  lookedLikeScan: boolean;
 }
 
 export interface LineItem {
@@ -110,6 +123,9 @@ export interface WorkOrder {
   signedBy?: string;
   signedAt?: string;
   createdBy?: string;
+  /** Fingerprint of the dispatched task scope - prevents duplicate dispatches. */
+  scopeHash?: string;
+  sourceJobId?: string;
 }
 
 export interface VerificationResponse {
@@ -134,18 +150,39 @@ export interface ExtractedJobRoomGroup {
   tasks: string[];
 }
 
+export interface ExtractedJobLineItem {
+  description: string;
+  quantity: string;
+  unit: string;
+  room: string;
+  trade: string;
+}
+
 export interface ExtractedJobData {
   projectName: string;
   propertyAddress?: string;
   insuredName?: string;
+  customerName?: string;
+  phone?: string;
+  email?: string;
   claimNumber?: string;
+  insuranceCarrier?: string;
+  adjusterName?: string;
   lossType?: string;
+  dateOfLoss?: string;
   unitArea: string;
   suggestedTrade: string;
   tasks: string[];
   tradeBreakdown?: ExtractedJobTradeGroup[];
   roomBreakdown?: ExtractedJobRoomGroup[];
+  lineItems?: ExtractedJobLineItem[];
   totalEstimate?: string;
   notes?: string;
   rawTextPreview?: string;
+  /** How the scope was produced, and how much the pipeline trusts it. */
+  extractionMethod?: string;
+  confidence?: number;
+  warnings?: string[];
+  sourceHash?: string;
+  documentStats?: DocumentStats;
 }
