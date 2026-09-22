@@ -77,6 +77,7 @@ export interface Job {
   notes?: string;
   extractedTrades?: ExtractedJobTradeGroup[];
   extractedTasks?: string[];
+  fieldPackage?: FieldWorkOrderSection[];
   createdAt: string;
   workOrderIds: string[];
   workOrders?: WorkOrder[];
@@ -99,10 +100,29 @@ export interface LineItem {
   lineId: string;
   woId: string;
   taskDescription: string;
+  /** Plain-English, verb-first field instruction for this scope line. */
+  instruction?: string;
   status: 'Pending' | 'Completed' | 'Flagged';
   photoUrl: string;
   notes?: string;
   timestamp: string;
+}
+
+/** One room (or "General") inside a trade's field work order package. */
+export interface FieldWorkOrderRoom {
+  roomName: string;
+  instructions: string[];
+}
+
+/** The five mandatory blocks a crew needs before they start work. */
+export interface FieldWorkOrderSection {
+  tradeName: string;
+  scopeSummary: string;
+  safetyProtocols: string[];
+  rooms: FieldWorkOrderRoom[];
+  materials: string[];
+  qualityChecks: string[];
+  exclusions: string[];
 }
 
 export interface WorkOrder {
@@ -126,6 +146,8 @@ export interface WorkOrder {
   /** Fingerprint of the dispatched task scope - prevents duplicate dispatches. */
   scopeHash?: string;
   sourceJobId?: string;
+  /** Trade-scoped field instructions (safety, materials, QC, do-not-perform list). */
+  fieldPackage?: FieldWorkOrderSection[];
 }
 
 export interface VerificationResponse {
@@ -156,6 +178,8 @@ export interface ExtractedJobLineItem {
   unit: string;
   room: string;
   trade: string;
+  /** Verb-first field instruction derived from the scope line. */
+  instruction?: string;
 }
 
 export interface ExtractedJobData {
@@ -176,6 +200,7 @@ export interface ExtractedJobData {
   tradeBreakdown?: ExtractedJobTradeGroup[];
   roomBreakdown?: ExtractedJobRoomGroup[];
   lineItems?: ExtractedJobLineItem[];
+  fieldPackage?: FieldWorkOrderSection[];
   totalEstimate?: string;
   notes?: string;
   rawTextPreview?: string;

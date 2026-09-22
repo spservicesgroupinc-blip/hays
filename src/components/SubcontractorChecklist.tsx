@@ -230,6 +230,94 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
         </div>
       )}
 
+      {/* 2b. FIELD WORK ORDER PACKAGE (what this crew must do, room by room) */}
+      {Array.isArray(workOrder.fieldPackage) && workOrder.fieldPackage.length > 0 && (
+        <div className="space-y-3 mb-4">
+          {workOrder.fieldPackage.map((section, sIdx) => (
+            <div key={sIdx} className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+              <div className="px-4 py-2.5 bg-slate-950 text-white flex items-center justify-between gap-2">
+                <span className="text-[11px] font-black uppercase tracking-wider">
+                  Field Work Order Instructions
+                </span>
+                <span className="text-[10px] font-mono text-slate-300 truncate">{section.tradeName}</span>
+              </div>
+
+              <div className="p-4 space-y-3 text-xs text-slate-700">
+                {section.scopeSummary && (
+                  <p className="font-semibold text-slate-900 text-[13px] leading-snug">{section.scopeSummary}</p>
+                )}
+
+                {section.safetyProtocols.length > 0 && (
+                  <div>
+                    <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wide text-slate-500 mb-1">
+                      <ShieldAlert className="w-3.5 h-3.5 text-[#C81D25]" />
+                      Safety & Containment
+                    </span>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      {section.safetyProtocols.map((entry, i) => <li key={i}>{entry}</li>)}
+                    </ul>
+                  </div>
+                )}
+
+                {section.rooms.length > 0 && (
+                  <div>
+                    <span className="block text-[10px] font-black uppercase tracking-wide text-slate-500 mb-1">
+                      Room-by-Room Instructions
+                    </span>
+                    <div className="space-y-2">
+                      {section.rooms.map((room, i) => (
+                        <div key={i} className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
+                          <span className="block font-bold text-slate-900 mb-0.5">{room.roomName}</span>
+                          <ul className="list-disc list-inside space-y-0.5">
+                            {room.instructions.map((entry, j) => <li key={j}>{entry}</li>)}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {section.materials.length > 0 && (
+                  <div>
+                    <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wide text-slate-500 mb-1">
+                      <Info className="w-3.5 h-3.5 text-slate-400" />
+                      Materials & Equipment
+                    </span>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      {section.materials.map((entry, i) => <li key={i}>{entry}</li>)}
+                    </ul>
+                  </div>
+                )}
+
+                {section.qualityChecks.length > 0 && (
+                  <div>
+                    <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wide text-slate-500 mb-1">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                      Quality Checks & Punch List
+                    </span>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      {section.qualityChecks.map((entry, i) => <li key={i}>{entry}</li>)}
+                    </ul>
+                  </div>
+                )}
+
+                {section.exclusions.length > 0 && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-800">
+                    <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wide mb-1">
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      Do Not Perform
+                    </span>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      {section.exclusions.map((entry, i) => <li key={i}>{entry}</li>)}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* 3. LINE ITEM CARDS */}
       <div className="space-y-3">
         <div className="flex items-center justify-between px-1">
@@ -270,6 +358,11 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
                     <p className="text-xs sm:text-sm font-bold text-slate-900 leading-snug">
                       {item.taskDescription}
                     </p>
+                    {item.instruction && (
+                      <p className="text-[11px] text-slate-500 leading-snug mt-0.5">
+                        {item.instruction}
+                      </p>
+                    )}
                   </div>
                 </div>
 

@@ -2,14 +2,7 @@ import express from 'express';
 import path from 'path';
 import crypto from 'crypto';
 import fs from 'fs';
-import { GoogleGenAI, Type } from '@google/genai';
-import {
-  extractEstimate,
-  normalizeDocumentText,
-  nextSequentialId,
-  GENERAL_TRADE,
-  type EstimateExtraction
-} from './estimate-extractor.js';
+import { extractEstimate, normalizeDocumentText, nextSequentialId, sanitizeFieldScope, buildFieldInstruction, GENERAL_TRADE, type EstimateExtraction, type FieldWorkOrderSection } from './estimate-extractor.js';
 
 const app = express();
 const PORT = 3000;
@@ -19,22 +12,6 @@ const isServerlessRuntime = Boolean(
   process.env.AWS_LAMBDA_FUNCTION_NAME ||
   process.env.LAMBDA_TASK_ROOT
 );
-
-// Lazy initialize Gemini client (strictly server-side)
-let aiClient: GoogleGenAI | null = null;
-function getGenAI(): GoogleGenAI {
-  if (!aiClient) {
-    aiClient = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY || '',
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
-  }
-  return aiClient;
-}
 
 // Handle serverless pre-parsed bodies (e.g. Vercel @vercel/node) so body-parser does not crash on consumed stream
 app.use((req, _res, next) => {
@@ -154,6 +131,8 @@ interface LineItem {
   lineId: string;
   woId: string;
   taskDescription: string;
+  /** Plain-English field instruction for this scope line (verb-first, no pricing). */
+  instruction?: string;
   status: 'Pending' | 'Completed' | 'Flagged';
   photoUrl: string;
   notes?: string;
@@ -173,6 +152,8 @@ interface JobRecord {
   scopeSummary?: string;
   extractedTrades?: { tradeName: string; tasks: string[] }[];
   extractedTasks?: string[];
+  /** Trade-by-trade field package produced by the extraction pipeline. */
+  fieldPackage?: FieldWorkOrderSection[];
   createdAt: string;
   workOrderIds: string[];
   /** Extraction provenance - lets the PM see how the scope was produced. */
@@ -204,6 +185,8 @@ interface WorkOrder {
   /** Hash of the exact task scope so the same scope can never be dispatched twice. */
   scopeHash?: string;
   sourceJobId?: string;
+  /** Field-ready instructions for this trade (safety, materials, QC, exclusions). */
+  fieldPackage?: FieldWorkOrderSection[];
 }
 
 interface UserRecord {
@@ -1578,6 +1561,42 @@ app.get('/api/pm/activity-feed', (req, res) => {
 // 6d. Estimate scope helpers shared by the extractor and work order routes
 // ---------------------------------------------------------------------------
 
+/** Case/format-insensitive key used to pair a task string with its source scope line. */
+function scopeKey(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+const FIELD_UNIT_RE = /^(?:sf|sq ?ft|square feet?|ft2|lft|lf|linear feet?|ft|feet|in|inch(?:es)?|ea|each|hr|hours?|ls|lot|cy|cubic yards?|sy|sq|square|til|squares?|rf|bf|gal|gallons?|lb|lbs|pounds?|pr|pairs?|cs|cases?|bdl|bundles?|pc|pieces?|rolls?|pails?|qt|quarts?|bags?|days?|weeks?|no|tile)$/i;
+
+/**
+ * Split a stored task string back into its description and measurement. Tasks are
+ * saved as "description (12 SF)" while the source scope line may be bare, so the
+ * lookup needs both halves to pair a task with its instruction.
+ */
+function splitTaskMeasurement(task: string): { description: string; quantity: string; unit: string } {
+  const text = String(task || '').replace(/\s{2,}/g, ' ').trim();
+  const whole = { description: text, quantity: '', unit: '' };
+  const trailing = text.match(/[(\[]?\s*(\d+(?:[.,]\d+)?)\s*([A-Za-z]{1,10})?\s*[)\]]?\s*$/);
+  if (!trailing || trailing.index === undefined) return whole;
+  const unit = (trailing[2] || '').trim();
+  const tail = text.slice(trailing.index);
+  // A bare trailing number only counts when a unit or a bracket marks it as a measurement.
+  if (!unit && !/[(\[]/.test(tail)) return whole;
+  if (unit && !FIELD_UNIT_RE.test(unit)) return whole;
+  const description = text.slice(0, trailing.index).replace(/[\s\-–—:|,;/]+$/, '').trim();
+  if (description.length < 3) return whole;
+  return { description, quantity: trailing[1].replace(/,/g, ''), unit: unit.toUpperCase() };
+}
+
+/** Every key a task or scope line might be stored under, with and without its measurement. */
+function scopeKeys(text: string): string[] {
+  const base = scopeKey(text);
+  const keys = base ? [base] : [];
+  const loose = scopeKey(splitTaskMeasurement(text).description);
+  if (loose && loose !== base) keys.push(loose);
+  return keys;
+}
+
 /** Collapse whitespace, drop blanks and remove duplicate tasks (case/format insensitive). */
 function normalizeTaskList(tasks: unknown): string[] {
   if (!Array.isArray(tasks)) return [];
@@ -1585,14 +1604,116 @@ function normalizeTaskList(tasks: unknown): string[] {
   const out: string[] = [];
   for (const raw of tasks) {
     if (typeof raw !== 'string') continue;
-    const task = raw.replace(/\s{2,}/g, ' ').trim();
-    const key = task.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    // Field crews never see pricing, unit rates or Xactimate codes.
+    const task = sanitizeFieldScope(raw).replace(/\s{2,}/g, ' ').trim();
+    const key = scopeKey(task);
     if (task.length < 3 || !key || seen.has(key)) continue;
     seen.add(key);
     out.push(task.slice(0, 400));
     if (out.length >= 120) break;
   }
   return out;
+}
+
+/** Pair every scope line item with the plain-English instruction that explains it. */
+function taskInstructionMap(lineItems: unknown): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!Array.isArray(lineItems)) return map;
+  for (const entry of lineItems) {
+    if (!entry || typeof entry !== 'object') continue;
+    const description = (entry as any).description;
+    const instruction = (entry as any).instruction;
+    if (typeof description !== 'string' || typeof instruction !== 'string') continue;
+    const text = sanitizeFieldScope(instruction).replace(/\s{2,}/g, ' ').trim();
+    if (!text) continue;
+    for (const key of scopeKeys(sanitizeFieldScope(description))) {
+      if (!map.has(key)) map.set(key, text.slice(0, 400));
+    }
+  }
+  return map;
+}
+
+/** Look an instruction up by task text, tolerating a task that carries its measurement. */
+function lookupInstruction(map: Map<string, string>, task: string): string | undefined {
+  const direct = map.get(scopeKey(task));
+  if (direct) return direct;
+  for (const key of scopeKeys(task)) {
+    const found = map.get(key);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** The crew-ready instruction for a task, regenerated with its real quantity when unmatched. */
+function instructionForTask(map: Map<string, string>, task: string, trade: string): string {
+  const matched = lookupInstruction(map, task);
+  if (matched) return matched;
+  const parts = splitTaskMeasurement(task);
+  return buildFieldInstruction(parts.description, parts.quantity, parts.unit, trade);
+}
+
+/**
+ * Pick the field-work-order section(s) that belong to a trade. Crews only ever
+ * receive their own trade's package - never another crew's scope.
+ */
+function fieldPackageForTrade(pkg: unknown, trade: string | undefined): FieldWorkOrderSection[] {
+  const sections = normalizeFieldPackage(pkg);
+  if (sections.length === 0) return [];
+  const wanted = scopeKey(String(trade || ''));
+  if (!wanted) return [];
+  const exact = sections.filter((section) => scopeKey(section.tradeName) === wanted);
+  if (exact.length > 0) return exact;
+  return sections.filter((section) => {
+    const name = scopeKey(section.tradeName);
+    return name.includes(wanted) || wanted.includes(name);
+  });
+}
+
+/** Keep only the field-package shape the UI renders, and drop anything empty. */
+function normalizeFieldPackage(value: unknown): FieldWorkOrderSection[] {
+  if (!Array.isArray(value)) return [];
+  const stringList = (input: unknown, max: number): string[] => {
+    if (!Array.isArray(input)) return [];
+    const out: string[] = [];
+    for (const entry of input) {
+      if (typeof entry !== 'string') continue;
+      const text = sanitizeFieldScope(entry).replace(/\s{2,}/g, ' ').trim();
+      if (!text) continue;
+      out.push(text.slice(0, 400));
+      if (out.length >= max) break;
+    }
+    return out;
+  };
+
+  const sections: FieldWorkOrderSection[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue;
+    const tradeName = String((raw as any).tradeName || '').trim().slice(0, 80);
+    if (!tradeName) continue;
+    const rooms = Array.isArray((raw as any).rooms)
+      ? (raw as any).rooms
+        .filter((room: any) => room && typeof room === 'object')
+        .map((room: any) => ({
+          roomName: sanitizeFieldScope(String(room.roomName || 'General')).slice(0, 60) || 'General',
+          instructions: stringList(room.instructions, 8)
+        }))
+        .filter((room: any) => room.instructions.length > 0)
+        .slice(0, 10)
+      : [];
+    sections.push({
+      tradeName,
+      scopeSummary: sanitizeFieldScope(String((raw as any).scopeSummary || '')).slice(0, 500),
+      safetyProtocols: stringList((raw as any).safetyProtocols, 6),
+      rooms,
+      materials: stringList((raw as any).materials, 8),
+      qualityChecks: stringList((raw as any).qualityChecks, 6),
+      exclusions: stringList((raw as any).exclusions, 8)
+    });
+    if (sections.length >= 8) break;
+  }
+  return sections.filter((section) =>
+    section.scopeSummary || section.rooms.length > 0 || section.exclusions.length > 0
+  );
 }
 
 function hashScope(parts: (string | undefined | null)[]): string {
@@ -1649,6 +1770,7 @@ function toExtractedJobPayload(extraction: EstimateExtraction) {
     tradeBreakdown: extraction.tradeBreakdown,
     roomBreakdown: extraction.roomBreakdown,
     lineItems: extraction.lineItems,
+    fieldPackage: extraction.fieldPackage,
     confidence: extraction.confidence,
     warnings: extraction.warnings,
     extractionMethod: extraction.extractionMethod,
@@ -1680,6 +1802,7 @@ function jobToExtractedPayload(job: JobRecord) {
     tradeBreakdown: job.extractedTrades || [],
     roomBreakdown: [],
     lineItems: [],
+    fieldPackage: normalizeFieldPackage(job.fieldPackage),
     confidence: job.extractionConfidence ?? 0,
     warnings: job.extractionWarnings || [],
     extractionMethod: job.extractionMethod || 'stored_extraction',
@@ -1777,8 +1900,7 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       return res.status(422).json({
         success: false,
         method: extraction.extractionMethod,
-        error: extraction.warnings[0]
-          || 'No line-item scope could be read from this document. Paste the estimate scope text or upload the digital PDF export.',
+        error: 'No line-item scope could be read from this document, so no work orders were created. Upload the digital PDF export (not a scan) or paste the scope/line-item table.',
         data,
         warnings: extraction.warnings
       });
@@ -1801,6 +1923,7 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       scopeSummary: extraction.unitArea || 'Restoration Scope',
       extractedTrades: extraction.tradeBreakdown,
       extractedTasks: extraction.tasks,
+      fieldPackage: extraction.fieldPackage,
       createdAt: new Date().toISOString(),
       workOrderIds: [],
       sourceHash: extraction.sourceHash,
@@ -1861,14 +1984,16 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       const tasks = normalizeTaskList(extraction.tasks);
       const woId = allocateWorkOrderId();
       const scheduled = scheduledDate || new Date().toISOString().split('T')[0];
+      const trade = extraction.suggestedTrade || GENERAL_TRADE;
+      const instructions = taskInstructionMap(extraction.lineItems);
 
       createdWorkOrder = {
         woId,
         jobId,
-        projectName: `${custName} - ${extraction.suggestedTrade || extraction.lossType || 'Restoration'}`,
+        projectName: `${custName} - ${trade || extraction.lossType || 'Restoration'}`,
         customerName: custName,
         propertyAddress: extraction.propertyAddress,
-        trade: extraction.suggestedTrade || GENERAL_TRADE,
+        trade,
         unitArea: extraction.unitArea || 'Restoration Scope',
         subName: resolvedSubName || 'Unassigned Subcontractor',
         subPhone: resolvedSubPhone,
@@ -1879,13 +2004,15 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
         completedItems: 0,
         createdBy: user.name,
         scopeHash: hashScope([jobId, extraction.suggestedTrade, ...tasks]),
-        sourceJobId: jobId
+        sourceJobId: jobId,
+        fieldPackage: fieldPackageForTrade(extraction.fieldPackage, trade)
       };
 
       createdLineItems = tasks.map((taskDescription, idx) => ({
         lineId: `${woId}-L${String(idx + 1).padStart(2, '0')}`,
         woId,
         taskDescription,
+        instruction: instructionForTask(instructions, taskDescription, trade),
         status: 'Pending' as const,
         photoUrl: '',
         notes: '',
@@ -2025,7 +2152,8 @@ app.post('/api/work-orders', async (req, res) => {
       scheduledDate,
       tasks,
       assignedSubId,
-      force
+      force,
+      fieldPackage
     } = req.body || {};
 
     const cleanTasks = normalizeTaskList(tasks);
@@ -2044,6 +2172,11 @@ app.post('/api/work-orders', async (req, res) => {
       || (finalCustomerName ? `${finalCustomerName} - ${finalTrade}` : `Work Order ${finalTrade}`);
     const finalUnit = unitArea || (linkedJob ? linkedJob.scopeSummary : '') || 'Restoration Scope';
     const scheduled = scheduledDate || new Date().toISOString().split('T')[0];
+    const instructions = taskInstructionMap(req.body?.lineItems);
+    const tradeFieldPackage = fieldPackageForTrade(
+      fieldPackage ?? (linkedJob ? linkedJob.fieldPackage : undefined),
+      finalTrade
+    );
 
     // Idempotency: dispatching the identical scope twice returns the existing work
     // order instead of appending a duplicate (this is what used to look like the
@@ -2094,13 +2227,15 @@ app.post('/api/work-orders', async (req, res) => {
       completedItems: 0,
       createdBy: user.name,
       scopeHash,
-      sourceJobId: jobId || undefined
+      sourceJobId: jobId || undefined,
+      fieldPackage: tradeFieldPackage
     };
 
     const newLines: LineItem[] = cleanTasks.map((taskDesc, idx) => ({
       lineId: `${woId}-L${String(idx + 1).padStart(2, '0')}`,
       woId,
       taskDescription: taskDesc,
+      instruction: instructionForTask(instructions, taskDesc, finalTrade),
       status: 'Pending',
       photoUrl: '',
       timestamp: ''

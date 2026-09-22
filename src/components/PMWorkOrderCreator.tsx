@@ -17,8 +17,8 @@ import {
   Zap,
   Check
 } from 'lucide-react';
-import { WorkOrder, User, ExtractedJobData, Job } from '../types';
-import { safeFetchJson } from '../utils/api';
+import { WorkOrder, User, ExtractedJobData, Job, FieldWorkOrderSection, ExtractedJobLineItem } from '../types';
+import { safeFetchJson, formatApiMessage } from '../utils/api';
 
 interface PMWorkOrderCreatorProps {
   onWorkOrderCreated: (newWo: WorkOrder) => Promise<void>;
@@ -59,6 +59,22 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
   }>>([]);
   const [isCreatingWorkOrders, setIsCreatingWorkOrders] = useState(false);
 
+  // Field work order package extracted from the document (per trade crew).
+  const [fieldPackage, setFieldPackage] = useState<FieldWorkOrderSection[]>([]);
+  const [extractedLines, setExtractedLines] = useState<ExtractedJobLineItem[]>([]);
+
+  /** The field package section(s) belonging to one trade crew. */
+  const sectionsForTrade = (tradeName: string): FieldWorkOrderSection[] => {
+    const key = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const wanted = key(tradeName);
+    const exact = fieldPackage.filter((section) => key(section.tradeName) === wanted);
+    if (exact.length > 0) return exact;
+    return fieldPackage.filter((section) => {
+      const name = key(section.tradeName);
+      return Boolean(wanted) && (name.includes(wanted) || wanted.includes(name));
+    });
+  };
+
   // What the extraction pipeline actually did (method, confidence, warnings)
   const [extractionInfo, setExtractionInfo] = useState<{
     method: string;
@@ -82,6 +98,15 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
       })
       .catch(() => {});
   }, []);
+
+  /** The plain-English instruction that belongs to one scope line, if the pipeline produced one. */
+  const instructionFor = (task: string): string => {
+    const key = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const wanted = key(task);
+    if (!wanted) return '';
+    const match = extractedLines.find((line) => key(line.description) === wanted);
+    return match?.instruction || '';
+  };
 
   // Upload & Extract Estimate
   const processEstimate = async (fileObj: File | null, rawText?: string) => {
@@ -138,8 +163,12 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
 
       const result = extractData;
       if (!ok || !result?.success || !result?.data) {
-        const warnings: string[] = Array.isArray(result?.warnings) ? result.warnings : [];
-        setErrorMsg([extractError || result?.error || 'Failed to extract estimate information.', ...warnings].join(' '));
+        setErrorMsg(
+          formatApiMessage(
+            extractError || result?.error,
+            result?.warnings
+          ) || 'Failed to extract estimate information. Please retry or create the job manually.'
+        );
         return;
       }
 
@@ -152,6 +181,8 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
       }
 
       setCreatedJob(job);
+      setFieldPackage(Array.isArray(data.fieldPackage) ? data.fieldPackage : []);
+      setExtractedLines(Array.isArray(data.lineItems) ? data.lineItems : []);
       setExtractionInfo({
         method: data.extractionMethod || result.method || 'extraction',
         confidence: typeof data.confidence === 'number' ? data.confidence : 0,
@@ -232,7 +263,9 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
             subName: sub ? sub.company : '',
             subPhone: sub ? sub.phone : '',
             scheduledDate: item.scheduledDate,
-            tasks: item.tasks
+            tasks: item.tasks,
+            fieldPackage: sectionsForTrade(item.tradeName),
+            lineItems: extractedLines
           })
         });
 
@@ -543,15 +576,83 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
                     )}
                   </div>
 
-                  {/* Tasks Preview */}
-                  <ul className="space-y-1 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                  {/* Tasks Preview - each line keeps its verb-first field instruction */}
+                  <ul className="space-y-1.5 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
                     {assignment.tasks.map((task, tIdx) => (
                       <li key={tIdx} className="flex items-start gap-1.5">
                         <span className="text-[10px] text-slate-400 font-mono mt-0.5">•</span>
-                        <span>{task}</span>
+                        <span className="space-y-0.5">
+                          <span className="block">{task}</span>
+                          {instructionFor(task) && (
+                            <span className="block text-[11px] text-slate-500">{instructionFor(task)}</span>
+                          )}
+                        </span>
                       </li>
                     ))}
                   </ul>
+
+                  {/* Field work order package preview (what the crew will read on site) */}
+                  {sectionsForTrade(assignment.tradeName).map((section, sIdx) => (
+                    <div key={sIdx} className="mt-2.5 p-3 rounded-lg border border-slate-200 bg-slate-50/60 space-y-2 text-[11px] text-slate-700">
+                      <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wide text-slate-500">
+                        <HardHat className="w-3.5 h-3.5" />
+                        <span>Field work order package · {section.tradeName}</span>
+                      </div>
+                      {section.scopeSummary && <p className="text-slate-800 font-semibold">{section.scopeSummary}</p>}
+
+                      {section.safetyProtocols.length > 0 && (
+                        <div>
+                          <span className="block font-bold text-slate-900">Safety & containment</span>
+                          <ul className="list-disc list-inside space-y-0.5">
+                            {section.safetyProtocols.map((entry, i) => <li key={i}>{entry}</li>)}
+                          </ul>
+                        </div>
+                      )}
+
+                      {section.rooms.length > 0 && (
+                        <div>
+                          <span className="block font-bold text-slate-900">Room-by-room instructions</span>
+                          <ul className="space-y-1">
+                            {section.rooms.map((room, i) => (
+                              <li key={i}>
+                                <span className="font-semibold text-slate-800">{room.roomName}:</span>
+                                <ul className="list-disc list-inside space-y-0.5">
+                                  {room.instructions.map((entry, j) => <li key={j}>{entry}</li>)}
+                                </ul>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {section.materials.length > 0 && (
+                        <div>
+                          <span className="block font-bold text-slate-900">Materials & equipment</span>
+                          <ul className="list-disc list-inside space-y-0.5">
+                            {section.materials.map((entry, i) => <li key={i}>{entry}</li>)}
+                          </ul>
+                        </div>
+                      )}
+
+                      {section.qualityChecks.length > 0 && (
+                        <div>
+                          <span className="block font-bold text-slate-900">Quality & punch list</span>
+                          <ul className="list-disc list-inside space-y-0.5">
+                            {section.qualityChecks.map((entry, i) => <li key={i}>{entry}</li>)}
+                          </ul>
+                        </div>
+                      )}
+
+                      {section.exclusions.length > 0 && (
+                        <div className="rounded-md border border-red-200 bg-red-50 p-2 text-red-800">
+                          <span className="block font-black uppercase tracking-wide text-[10px]">Do not perform</span>
+                          <ul className="list-disc list-inside space-y-0.5">
+                            {section.exclusions.map((entry, i) => <li key={i}>{entry}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>
@@ -564,6 +665,8 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
                   setCreatedJob(null);
                   setTradeAssignments([]);
                   setExtractionInfo(null);
+                  setFieldPackage([]);
+                  setExtractedLines([]);
                   setFile(null);
                   setPasteText('');
                   setErrorMsg(null);
