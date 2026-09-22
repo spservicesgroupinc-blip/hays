@@ -241,10 +241,50 @@ function verifyPassword(password: string, salt: string, hash: string): boolean {
 }
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-const AUTH_SECRET = process.env.AUTH_SECRET || (() => {
-  console.warn('[WARNING] AUTH_SECRET environment variable is not set. Using a randomly generated secret for this process; user sessions will not persist across restarts.');
-  return crypto.randomBytes(32).toString('hex');
-})();
+
+// Resolve a stable signing secret for authentication tokens. The previous
+// behavior generated a new random secret on every process start, which made
+// every token issued by a previous process (or a different serverless
+// instance) fail verification with "Authentication required".
+function resolveAuthSecret(): string {
+  const configured = (process.env.AUTH_SECRET || '').trim();
+  if (configured) return configured;
+
+  // On serverless deployments, derive a deterministic secret from the stable
+  // deployment URL so every cold-start instance shares the same signing key.
+  const deploymentId = (
+    process.env.APP_URL ||
+    process.env.VERCEL_BRANCH_URL ||
+    process.env.VERCEL_URL ||
+    ''
+  ).trim();
+  if (deploymentId) {
+    return crypto.createHash('sha256')
+      .update(`fieldproof:auth-secret:${deploymentId}`)
+      .digest('hex');
+  }
+
+  // Local development: persist a generated secret so sessions survive
+  // server restarts.
+  try {
+    const secretDir = getWritableDataDir();
+    const secretFile = path.join(secretDir, 'auth_secret.txt');
+    if (fs.existsSync(secretFile)) {
+      const existing = fs.readFileSync(secretFile, 'utf-8').trim();
+      if (existing) return existing;
+    }
+    const generated = crypto.randomBytes(32).toString('hex');
+    fs.mkdirSync(secretDir, { recursive: true });
+    fs.writeFileSync(secretFile, generated, 'utf-8');
+    console.warn('[WARNING] AUTH_SECRET environment variable is not set. Generated a persistent local secret; set AUTH_SECRET for production stability.');
+    return generated;
+  } catch (err: any) {
+    console.warn('[WARNING] AUTH_SECRET environment variable is not set and a persistent secret could not be stored. Sessions may not survive restarts.');
+    return crypto.randomBytes(32).toString('hex');
+  }
+}
+
+const AUTH_SECRET = resolveAuthSecret();
 
 interface TokenPayload {
   uid: string;
