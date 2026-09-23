@@ -83,6 +83,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
     duplicate: boolean;
     message?: string;
     stats?: string;
+    documentKindLabel?: string;
   } | null>(null);
   const isSubmittingRef = useRef(false);
 
@@ -191,7 +192,8 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
         message: result.message,
         stats: data.documentStats
           ? `${data.documentStats.pages} page(s), ${data.documentStats.characters.toLocaleString()} characters read${data.documentStats.hasTextLayer ? '' : ' (no text layer)'}`
-          : undefined
+          : undefined,
+        documentKindLabel: data.documentKindLabel || undefined
       });
 
       // Build Trade Work Order assignment list strictly from the extracted scope.
@@ -306,7 +308,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
       
       {/* Header */}
       <div>
-        <h1 className="text-xl font-black text-slate-900">Upload Estimate & Create Job</h1>
+        <h1 className="text-xl font-black text-slate-900">Upload Estimate or Work Order & Create Job</h1>
         <p className="text-xs text-slate-500 mt-1">
           Upload an estimate document. The app automatically extracts customer details, creates the job, and lets you assign trade work orders to subcontractors.
         </p>
@@ -330,15 +332,21 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
             <span className="flex items-center gap-2 font-bold">
               <AlertCircle className="w-4 h-4 shrink-0" />
               {extractionInfo.duplicate
-                ? 'This estimate was already processed'
+                ? 'This document was already processed'
                 : extractionInfo.warnings.length > 0
-                  ? 'Estimate read with warnings'
-                  : 'Estimate read successfully'}
+                  ? 'Document read with warnings'
+                  : 'Document read successfully'}
             </span>
             <span className="font-mono text-[10px] uppercase tracking-wide opacity-80">
               {extractionInfo.method} · {Math.round(extractionInfo.confidence * 100)}% confidence
             </span>
           </div>
+          {extractionInfo.documentKindLabel && (
+            <p className="flex items-center gap-1.5">
+              <FileText className="w-3.5 h-3.5 shrink-0" />
+              Read as <span className="font-bold">{extractionInfo.documentKindLabel}</span>
+            </p>
+          )}
           {extractionInfo.message && <p>{extractionInfo.message}</p>}
           {extractionInfo.stats && <p className="opacity-80">{extractionInfo.stats}</p>}
           {extractionInfo.warnings.length > 0 && (
@@ -403,10 +411,10 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
               <div className="space-y-2 py-4">
                 <FileUp className="w-10 h-10 text-slate-400 mx-auto" />
                 <h3 className="text-sm font-bold text-slate-800">
-                  Drop your estimate PDF here or click to browse
+                  Drop your estimate or work order PDF here or click to browse
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Reads the PDF's own text layer (Xactimate, Symbility, carrier PDFs) or paste the text below. Scanned images are read by AI vision.
+                  Reads a priced estimate (Xactimate, Symbility, carrier PDFs) or a work order that already lists the work, straight from the PDF text layer - or paste the text below.
                 </p>
               </div>
             )}
@@ -415,7 +423,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
           {/* Quick Actions / Paste Alternative */}
           <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
             <span className="text-xs text-slate-500 font-medium">
-              Have text from Xactimate, Symbility, or email?
+              Have text from Xactimate, Symbility, a work order, or email?
             </span>
 
             <button
@@ -423,7 +431,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
               onClick={() => setShowPasteText(!showPasteText)}
               className="text-xs text-[#C81D25] hover:text-[#A8151D] font-bold"
             >
-              {showPasteText ? 'Hide text box' : 'Paste estimate text instead'}
+              {showPasteText ? 'Hide text box' : 'Paste document text instead'}
             </button>
           </div>
 
@@ -433,7 +441,7 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
                 rows={6}
                 value={pasteText}
                 onChange={(e) => setPasteText(e.target.value)}
-                placeholder="Paste estimate details here..."
+                placeholder="Paste the estimate line items or the work order task list here..."
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#C81D25]"
               />
               <button

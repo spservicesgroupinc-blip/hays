@@ -87,6 +87,9 @@ export interface Job {
   extractionConfidence?: number;
   extractionWarnings?: string[];
   documentStats?: DocumentStats;
+  /** `xactimate` for a priced estimate, `work-order` for an already-written work order. */
+  documentKind?: string;
+  documentKindLabel?: string;
 }
 
 export interface DocumentStats {
@@ -210,4 +213,7 @@ export interface ExtractedJobData {
   warnings?: string[];
   sourceHash?: string;
   documentStats?: DocumentStats;
+  /** `xactimate` for a priced estimate, `work-order` for an already-written work order. */
+  documentKind?: string;
+  documentKindLabel?: string;
 }

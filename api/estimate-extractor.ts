@@ -73,6 +73,24 @@ export interface DocumentStats {
   lookedLikeScan: boolean;
 }
 
+/**
+ * Which kind of document was submitted. A priced Xactimate/carrier estimate and
+ * a work order that has already been written both have to produce field work
+ * orders, but they are laid out differently: the estimate has priced columns and
+ * shorthand rows, while the work order already carries task-list wording and
+ * crew headings that must be preserved instead of re-derived.
+ */
+export type DocumentKind = 'xactimate' | 'work-order' | 'generic';
+
+export interface DocumentProfile {
+  kind: DocumentKind;
+  label: string;
+  /** Structural markers that produced the classification. */
+  signals: string[];
+  /** True when the document already carries field-ready task wording. */
+  fieldReady: boolean;
+}
+
 export interface EstimateExtraction {
   projectName: string;
   customerName: string;
@@ -100,6 +118,9 @@ export interface EstimateExtraction {
   source: EstimateSource;
   sourceHash: string;
   documentStats: DocumentStats;
+  /** Document type the pipeline recognised, and its human-readable label. */
+  documentKind: DocumentKind;
+  documentKindLabel: string;
   demoTemplatesSuppressed: number;
 }
 
@@ -128,6 +149,60 @@ export const SEVEN_CREWS = [
 ] as const;
 
 export const GENERAL_TRADE = 'General Restoration';
+
+/**
+ * Words a document may use for a crew when it does not spell out the crew's full
+ * name ("Painting Crew", "Demo", "Finish Carpentry", "Flooring"). Shared by the
+ * work-order heading reader and the AI trade-name normaliser so a heading and a
+ * model label always resolve to the same crew.
+ */
+const TRADE_ALIASES: Array<{ crew: string; keywords: string[] }> = [
+  {
+    crew: SEVEN_CREWS[0],
+    keywords: ['content', 'contents', 'pack out', 'pack-out', 'packout', 'demo', 'demolition', 'tear out', 'tear-out', 'mitigation', 'site protection', 'protection', 'containment', 'debris removal', 'debris', 'dumpster', 'extraction', 'board up', 'board-up']
+  },
+  {
+    crew: SEVEN_CREWS[1],
+    keywords: ['plumb', 'mechanical', 'hvac', 'water line', 'supply line', 'fixture', 'toilet', 'sink', 'faucet', 'appliance', 'water heater', 'valve', 'piping']
+  },
+  {
+    crew: SEVEN_CREWS[2],
+    keywords: ['elect', 'outlet', 'receptacle', 'switch', 'lighting', 'light fixture', 'panel', 'breaker', 'wiring']
+  },
+  {
+    crew: SEVEN_CREWS[3],
+    keywords: ['floor', 'flooring', 'floor covering', 'carpet', 'tile', 'ceramic', 'porcelain', 'vinyl', 'lvp', 'lvt', 'laminate', 'hardwood', 'subfloor', 'underlayment', 'grout']
+  },
+  {
+    crew: SEVEN_CREWS[4],
+    keywords: ['carpent', 'carpentry', 'millwork', 'door', 'trim', 'baseboard', 'casing', 'cabinet', 'cabinetry', 'countertop', 'vanity', 'shelving', 'hardware', 'window', 'stair']
+  },
+  {
+    crew: SEVEN_CREWS[5],
+    keywords: ['paint', 'painting', 'drywall', 'sheetrock', 'sheet rock', 'gypsum', 'finishing', 'finish', 'texture', 'patch', 'mudding', 'taping', 'wall repair', 'surface']
+  },
+  {
+    crew: SEVEN_CREWS[6],
+    keywords: ['clean', 'cleaning', 'final clean', 'post-construction clean', 'janitorial', 'haul', 'hauling', 'disposal', 'sanitize', 'disinfect', 'deodorize', 'dumpster service']
+  }
+];
+
+/** Longest keyword that appears in `text`, so "demolition" beats "demo". */
+function matchTradeAlias(text: string): string {
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack.trim()) return '';
+  let bestCrew = '';
+  let bestLength = 0;
+  for (const entry of TRADE_ALIASES) {
+    for (const keyword of entry.keywords) {
+      if (keyword.length <= bestLength) continue;
+      if (!haystack.includes(keyword)) continue;
+      bestCrew = entry.crew;
+      bestLength = keyword.length;
+    }
+  }
+  return bestCrew;
+}
 
 interface TradeRule {
   name: string;
@@ -682,6 +757,78 @@ export function normalizeDocumentText(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// DOCUMENT TYPE DETECTION
+// ---------------------------------------------------------------------------
+
+const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
+  xactimate: 'Xactimate / carrier estimate',
+  'work-order': 'Standard work order',
+  generic: 'Scope document'
+};
+
+/** Markers of a priced, code-driven insurance estimate. */
+const XACTIMATE_MARKERS: Array<{ re: RegExp; label: string; weight: number }> = [
+  { re: /\bxactimate\b|\bxactnet\b/i, label: 'Xactimate branding', weight: 4 },
+  { re: /\bsymbility\b|\bmsb\b|\bcorelogic\b/i, label: 'Symbility/CoreLogic branding', weight: 3 },
+  { re: /\b(?:overhead\s*(?:&|and)\s*profit|o\s*&\s*p)\b/i, label: 'overhead & profit row', weight: 3 },
+  { re: /\b(?:recoverable\s+|non-?recoverable\s+)?depreciation\b/i, label: 'depreciation row', weight: 3 },
+  { re: /\b(?:replacement cost|net claim|line item total|unit price|material sales tax)\b|\brcv\b|\bacv\b/i, label: 'insurance valuation columns', weight: 2 },
+  { re: /^\s*(?:description|desc\.?)\s+(?:qty|quantity)\s+(?:unit price|unit)\b/im, label: 'priced line-item table header', weight: 3 },
+  { re: /\b(?:cat\s*code|selector)\b/i, label: 'Xactimate category codes', weight: 2 }
+];
+
+/** Markers of a work order that has already been written for a crew. */
+const WORK_ORDER_MARKERS: Array<{ re: RegExp; label: string; weight: number }> = [
+  { re: /\bwork\s*order\b|\bworkorder\b/i, label: 'work order header', weight: 4 },
+  { re: /\bw\/o\b|\bwo\s*(?:#|no\.?|number)\b|\bwork order\s*(?:#|no\.?|number)\b/i, label: 'work order number', weight: 3 },
+  { re: /\bscope of work\b/i, label: 'scope-of-work heading', weight: 2 },
+  { re: /\b(?:task list|task description|work items|field instructions|work to be performed|description of work|punch list)\b/i, label: 'task-list heading', weight: 2 },
+  { re: /\bassigned (?:to|crew|subcontractor|trade)\b/i, label: 'crew assignment', weight: 2 },
+  { re: /\b(?:scheduled|completion|start|dispatch) date\b/i, label: 'schedule field', weight: 1 },
+  { re: /\b(?:do not perform|exclusions?|omitted scope)\b/i, label: 'exclusions list', weight: 1 },
+  { re: /\b(?:crew|trade|subcontractor)\s*(?:name|lead|chief|foreman)?\s*[:#]/i, label: 'crew field', weight: 1 }
+];
+
+function scoreMarkers(text: string, markers: Array<{ re: RegExp; label: string; weight: number }>, signals: string[]): number {
+  let score = 0;
+  for (const marker of markers) {
+    if (!marker.re.test(text)) continue;
+    score += marker.weight;
+    if (!signals.includes(marker.label)) signals.push(marker.label);
+  }
+  return score;
+}
+
+/**
+ * Decide which document was submitted. Both kinds must produce field work
+ * orders, but a work order already carries task wording and crew headings, so
+ * the parser must not demand estimate-style priced rows from it.
+ */
+export function detectDocumentProfile(text: string, fileName?: string): DocumentProfile {
+  const body = (text || '').slice(0, 60_000);
+  const name = String(fileName || '');
+  // A file name is a deliberate label, so it outweighs a passing mention.
+  const sample = `${name}\n${name}\n${body}`;
+  const signals: string[] = [];
+
+  const estimateScore = scoreMarkers(sample, XACTIMATE_MARKERS, signals);
+  const workOrderScore = scoreMarkers(sample, WORK_ORDER_MARKERS, signals);
+
+  let kind: DocumentKind = 'generic';
+  if (workOrderScore > 0 && workOrderScore >= estimateScore) kind = 'work-order';
+  else if (estimateScore >= 2) kind = 'xactimate';
+  else if (workOrderScore >= 3) kind = 'work-order';
+
+  return {
+    kind,
+    label: DOCUMENT_KIND_LABELS[kind],
+    signals: signals.slice(0, 4),
+    // A work order's rows are already the instruction a crew acts on.
+    fieldReady: kind === 'work-order'
+  };
+}
+
+// ---------------------------------------------------------------------------
 // FIELD EXTRACTION HELPERS
 // ---------------------------------------------------------------------------
 
@@ -1002,12 +1149,67 @@ interface ScopeLine {
   quantity: string;
   unit: string;
   room: string;
+  /** Crew named by a document heading, which outranks keyword classification. */
+  trade?: string;
   /** The untouched row text, still carrying trailing markers such as "no charge per adjuster". */
   raw?: string;
 }
 
 const ROOM_HEADER_RE = /^(?:room|area|location|floor|level)\s*(?:name)?\s*[:#-]?\s*(.{2,48})$/i;
 const DIMENSION_RE = /(\d{1,3})\s*(?:'|ft|feet)?\s*(?:x|by|\*)\s*(\d{1,3})\s*(?:'|ft|feet)?/i;
+
+/** Headings that open a block of field tasks rather than priced estimate rows. */
+const TASK_SECTION_HEADING_RE = /^(?:scope of work|work to be performed|description of work|work description|tasks?|task list|work items?|instructions?|field instructions?|field tasks?|line items?|crew instructions?|special instructions?)\s*:?\s*$/i;
+
+/** Headings that end the task block ("PRICING SUMMARY", "MATERIALS", "ESTIMATE TOTALS"). */
+const TASK_SECTION_END_RE = /^(?:(?:pricing|price|costs?|charges?|billing|invoice|payment|materials?|labou?rs?|equipment|expenses?|sub(?:contractor)?s?)\s*(?:summary|breakdown|details?|list|schedule|totals?)?|totals?|grand total|subtotal|summary|overhead\s*(?:&|and)?\s*profit)\s*:?\s*$/i;
+
+const TRADE_HEADING_LABEL_RE = /^(?:trade|crew|division|department|phase|section|task group|sub(?:contractor)? trade)\s*[:#-]\s*(.+)$/i;
+const TRADE_HEADING_SUFFIX_RE = /^(.{2,48}?)\s+(?:crew|trade|division|department|team|group)\s*:?$/i;
+
+/** Words that may appear inside a trade heading without naming work themselves. */
+const TRADE_LABEL_CONNECTORS = new Set(['and', 'the', 'of', 'to', 'all', 'work', 'crew', 'crews', 'trade', 'trades', 'team', 'group', 'division', 'department', 'phase', 'section', 'lead', 'foreman', 'chief', 'superintendent', 'subcontractor', 'general']);
+
+/** True when every word in the phrase is crew vocabulary, so the line labels a crew. */
+function isTradeLabelPhrase(phrase: string): boolean {
+  const words = phrase.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 4) return false;
+  return words.every((word) => {
+    if (word.length < 3 || TRADE_LABEL_CONNECTORS.has(word)) return true;
+    return TRADE_ALIASES.some((entry) => entry.keywords.some((keyword) =>
+      keyword === word
+      || (word.length >= 4 && keyword.startsWith(word))
+      || (word.length >= 4 && word.startsWith(keyword) && keyword.length >= 4)
+    ));
+  });
+}
+
+/**
+ * Recognise a heading that names one of the seven crews - "TRADE: PAINTING",
+ * "Flooring Crew", "Demo & Contents". A heading is a short line built only from
+ * crew vocabulary, so a real scope row ("Remove baseboard - 92 LF") is never
+ * mistaken for one and is kept as work.
+ */
+function matchTradeHeading(line: string): string {
+  const cleaned = line.replace(/^[*#•\-–—\s]+/, '').replace(/[\s:•\-–—]+$/, '').trim();
+  if (!cleaned || cleaned.length > 60) return '';
+  if (QUANTITY_UNIT_RE.test(cleaned) || /\d/.test(cleaned)) return '';
+  if (cleaned.split(/\s+/).length > 6) return '';
+  if (/[.!?]\s+\S/.test(cleaned)) return '';
+
+  const lower = cleaned.toLowerCase();
+  const exact = [...SEVEN_CREWS, GENERAL_TRADE].find((crew) => lower.includes(crew.toLowerCase()));
+  if (exact) return exact;
+
+  const label = cleaned.match(TRADE_HEADING_LABEL_RE);
+  const suffix = cleaned.match(TRADE_HEADING_SUFFIX_RE);
+  const candidates = label?.[1] ? [label[1]] : suffix?.[1] ? [suffix[1], cleaned] : [cleaned];
+  for (const candidate of candidates) {
+    if (!matchTradeAlias(candidate) || !isTradeLabelPhrase(candidate)) continue;
+    return matchTradeAlias(candidate);
+  }
+  return '';
+}
 
 function cleanLineDescription(raw: string): string {
   let text = raw.trim();
@@ -1022,15 +1224,50 @@ function cleanLineDescription(raw: string): string {
   return text;
 }
 
-function extractScopeLines(text: string): { lines: ScopeLine[]; rooms: string[] } {
+interface ScopeLineReadOptions {
+  /**
+   * True when the document is an already-written work order. Its body is field
+   * task text rather than a priced estimate grid, so every row below the header
+   * block is scope and the row gates below are applied in task-list mode.
+   */
+  workOrder?: boolean;
+}
+
+function extractScopeLines(text: string, options: ScopeLineReadOptions = {}): { lines: ScopeLine[]; rooms: string[] } {
   const rawLines = text.split('\n');
   const results: ScopeLine[] = [];
   const rooms: string[] = [];
   let currentRoom = '';
+  let currentTrade = '';
+  // A finished work order is a task list from its first body row; a priced
+  // estimate only becomes one after an explicit "SCOPE OF WORK"-style heading.
+  let inTaskList = Boolean(options.workOrder);
+  // Set inside a closing block (materials, pricing, billing): those bodies list
+  // supplies and money, not work, so nothing in them is scope.
+  let closedSection = false;
 
   for (const rawLine of rawLines) {
     const line = rawLine.trim();
     if (!line || line.length < 3) continue;
+
+    if (TASK_SECTION_END_RE.test(line)) {
+      closedSection = true;
+      inTaskList = false;
+      continue;
+    }
+    if (TASK_SECTION_HEADING_RE.test(line)) {
+      closedSection = false;
+      inTaskList = true;
+      continue;
+    }
+
+    const tradeHeading = matchTradeHeading(line);
+    if (tradeHeading) {
+      closedSection = false;
+      currentTrade = tradeHeading;
+      inTaskList = true;
+      continue;
+    }
 
     const roomHeader = line.match(ROOM_HEADER_RE);
     if (roomHeader && roomHeader[1] && !/\d{2,}/.test(roomHeader[1]) && !QUANTITY_UNIT_RE.test(roomHeader[1])) {
@@ -1039,6 +1276,7 @@ function extractScopeLines(text: string): { lines: ScopeLine[]; rooms: string[] 
       continue;
     }
 
+    if (closedSection) continue;
     if (NOISE_ITEM_RE.test(line)) continue;
     if (/^[\d\s.,$()%-]+$/.test(line)) continue;
 
@@ -1058,13 +1296,22 @@ function extractScopeLines(text: string): { lines: ScopeLine[]; rooms: string[] 
     const isSectionLike = /^[A-Z][A-Z /&,'-]{6,}$/.test(description) && !hasAction;
     if (isSectionLike && !exclusionRow) continue;
 
+    // Inside a task block the document already tells us these rows are work:
+    // bulleted or numbered lines, verb-first lines, and phrasing that names a
+    // trade all qualify even without an estimate-style quantity column.
+    const taskRow = inTaskList && (
+      /^[*\u2022\-–—]|^\d{1,2}[.)]\s/.test(line)
+      || VERB_FIRST_RE.test(description)
+      || (letters.length >= 8 && Boolean(matchTradeAlias(description)))
+    );
+
     const dimension = description.match(DIMENSION_RE);
     const hasQuantity = Boolean(qtyMatch || dimension);
     // A line with neither a trade action verb nor a measurable quantity is prose
     // (a cover note, an email footer, an adjuster comment) - not a scope item.
-    if (!hasAction && !hasQuantity && !exclusionRow) continue;
-    if (!hasQuantity && /[.!?]\s+[A-Z]/.test(description) && !exclusionRow) continue;
-    if (!hasAction && letters.length < 10 && !exclusionRow) continue;
+    if (!hasAction && !hasQuantity && !exclusionRow && !taskRow) continue;
+    if (!hasQuantity && /[.!?]\s+[A-Z]/.test(description) && !exclusionRow && !taskRow) continue;
+    if (!hasAction && letters.length < 10 && !exclusionRow && !taskRow) continue;
 
     const quantity = qtyMatch ? qtyMatch.quantity : dimension ? `${dimension[1]}x${dimension[2]}` : '';
     const unit = qtyMatch ? qtyMatch.unit : dimension ? 'FT' : '';
@@ -1074,6 +1321,7 @@ function extractScopeLines(text: string): { lines: ScopeLine[]; rooms: string[] 
       quantity,
       unit,
       room: currentRoom,
+      trade: currentTrade || undefined,
       raw: line.slice(0, 240)
     });
   }
@@ -1082,7 +1330,9 @@ function extractScopeLines(text: string): { lines: ScopeLine[]; rooms: string[] 
 }
 
 function scopeLineKey(line: ScopeLine): string {
-  return line.description
+  // The Xactimate category code ("PNT B2 ...") is not part of the work, so it must
+  // not split one row into two keys - the model returns the row without it.
+  return (sanitizeFieldScope(line.description) || line.description)
     .toLowerCase()
     .replace(/\b\d+(?:\.\d+)?\b/g, '')
     .replace(/[^a-z ]+/g, ' ')
@@ -1138,7 +1388,9 @@ function mapLinesToTrades(lines: ScopeLine[]): { groups: ExtractedTradeGroup[]; 
   const groups = new Map<string, string[]>();
 
   for (const line of lines) {
-    const trade = classifyTrade(line.description) || GENERAL_TRADE;
+    // A crew heading in the document outranks keyword scoring: the author already
+    // assigned the work, and aliases such as "drywall" appear in several trades.
+    const trade = line.trade || classifyTrade(line.description) || GENERAL_TRADE;
     const label = line.quantity ? `${line.description} (${line.quantity}${line.unit ? ` ${line.unit}` : ''})` : line.description;
     if (!groups.has(trade)) groups.set(trade, []);
     groups.get(trade)!.push(label);
@@ -1178,8 +1430,10 @@ const XACTIMATE_CODES = [
   'CON', 'MAS', 'MTL', 'LIT', 'TMP', 'SHT', 'SKT', 'SPK', 'STC', 'SWP', 'TFG', 'STN', 'SHL', 'REC',
   'SWS', 'STS', 'VEN', 'CLG', 'EQS', 'GNT', 'LNT', 'MNS', 'PWD', 'SLD', 'SPC', 'SST', 'WDP'
 ];
+// The optional suffix carries Xactimate sub-codes ("PNT B2", "GYP 1/2"), so it must
+// end on a word boundary - without it "FLR Remove vinyl" swallows the "R" of "Remove".
 const XACTIMATE_CODE_RE = new RegExp(
-  String.raw`\b(?:${XACTIMATE_CODES.join('|')})\b(?:\s+[A-Z0-9]{1,3})?`,
+  String.raw`\b(?:${XACTIMATE_CODES.join('|')})\b(?:\s+[A-Z0-9]{1,3}\b)?`,
   'g'
 );
 
@@ -1346,13 +1600,44 @@ function withMeasurement(instruction: string, quantity: string, unit: string): s
   return `${instruction} (${quantity}${unit ? ` ${unit}` : ''})`;
 }
 
+/** A sentence already written as field work, with a verb and enough detail to act on. */
+function isAuthoredInstruction(text: string): boolean {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (VERB_FIRST_RE.test(text)) return words.length >= 4;
+  // Prose rows ("Final clean the hallway, wipe all trim...") open with an adverb,
+  // not a verb: keep them when they carry the detail the author wrote, but leave
+  // short shorthand rows to the standing rewrites.
+  if (words.length < 6) return false;
+  return /[,;]|\band\b/i.test(text) || words.length >= 8;
+}
+
+function ensureSentence(text: string): string {
+  const trimmed = text.trim().replace(/[\s.,;:]+$/, '');
+  if (!trimmed) return '';
+  const capitalised = /^[A-Z]/.test(trimmed) ? trimmed : `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
+  return `${capitalised}.`;
+}
+
 /**
  * Restate a scope row as the physical labour action the crew performs, keeping
  * the measured quantity that came off the estimate.
+ *
+ * `authoredWording` is set when the source document is a finished work order: its
+ * rows are already written in field terms, so the author's own wording is kept
+ * instead of being replaced by the standing rewrite for that material.
  */
-export function buildFieldInstruction(description: string, quantity: string, unit: string, trade: string): string {
+export function buildFieldInstruction(
+  description: string,
+  quantity: string,
+  unit: string,
+  trade: string,
+  authoredWording = false
+): string {
   const clean = sanitizeFieldScope(description);
   if (!clean) return '';
+  if (authoredWording && isAuthoredInstruction(clean)) {
+    return withMeasurement(ensureSentence(clean), quantity, unit);
+  }
   const removal = REMOVAL_INTENT_RE.test(clean);
   for (const rule of FIELD_INSTRUCTION_RULES) {
     if (!rule.match.test(clean)) continue;
@@ -1579,6 +1864,10 @@ export function parseEstimateText(rawText: string, options: ParseEstimateOptions
   const text = normalizeDocumentText(rawText);
   const lines = text.split('\n').filter(Boolean);
   const warnings: string[] = [...(options.baseWarnings || [])];
+  const profile = detectDocumentProfile(text, options.fileName || '');
+  if (profile.kind === 'work-order') {
+    warnings.push('This document is an existing work order, so its task rows were used as the scope of work. Confirm identity fields and quantities that the work order does not state.');
+  }
 
   const customerName = titleCaseName(
     labeledValue(lines, ['named insured', 'insured name', 'insured', 'customer name', 'customer', 'homeowner', 'property owner', 'claimant', 'client'], isPlausiblePersonName)
@@ -1593,7 +1882,7 @@ export function parseEstimateText(rawText: string, options: ParseEstimateOptions
   const dateOfLoss = findDate(lines, ['date of loss', 'loss date', 'dol', 'date of occurrence', 'occurred']);
   const totalEstimate = findTotal(lines, text);
 
-  const { lines: scopeLines, rooms } = extractScopeLines(text);
+  const { lines: scopeLines, rooms } = extractScopeLines(text, { workOrder: profile.kind === 'work-order' });
   const uniqueScope: ScopeLine[] = [];
   const exclusions: Array<{ description: string; trade: string }> = [];
   const seenKeys = new Set<string>();
@@ -1621,7 +1910,7 @@ export function parseEstimateText(rawText: string, options: ParseEstimateOptions
 
   const { groups: tradeBreakdown, lineItems } = mapLinesToTrades(uniqueScope);
   for (const item of lineItems) {
-    item.instruction = buildFieldInstruction(item.description, item.quantity, item.unit, item.trade);
+    item.instruction = buildFieldInstruction(item.description, item.quantity, item.unit, item.trade, profile.fieldReady);
   }
   const fieldPackage = buildFieldPackage(lineItems, exclusions);
   const tasks = uniqueScope.map((line) => (line.quantity ? `${line.description} (${line.quantity}${line.unit ? ` ${line.unit}` : ''})` : line.description));
@@ -1659,7 +1948,9 @@ export function parseEstimateText(rawText: string, options: ParseEstimateOptions
   if (!propertyAddress) warnings.push('No property address was found in the document.');
   if (!claimNumber) warnings.push('No claim number was found in the document.');
   if (tasks.length === 0) {
-    warnings.push('No line-item scope could be read from this document. Paste the scope/line-item table so work orders can be created.');
+    warnings.push(profile.kind === 'work-order'
+      ? 'No task rows could be read from this work order. Make sure the scope/task list text layer is present and not a scanned image.'
+      : 'No line-item scope could be read from this document. Paste the scope/line-item table so work orders can be created.');
   }
   if (tasks.length > 0 && !lineItems.some((item) => item.quantity)) {
     warnings.push('Scope items were found without quantities - verify measurements against the estimate.');
@@ -1681,7 +1972,9 @@ export function parseEstimateText(rawText: string, options: ParseEstimateOptions
   const projectName = projectNameParts.filter(Boolean).join(' - ');
 
   const notes = [
-    `Scope and customer details extracted from the submitted ${options.source === 'pdf' ? 'PDF estimate' : 'pasted estimate text'}.`,
+    profile.kind === 'work-order'
+      ? `Scope of work read from the submitted ${options.source === 'pdf' ? 'PDF work order' : 'pasted work order text'}; customer details were used where the document states them.`
+      : `Scope and customer details extracted from the submitted ${options.source === 'pdf' ? 'PDF estimate' : 'pasted estimate text'}.`,
     'Every line item requires subcontractor photo verification before sign-off.'
   ].join(' ');
 
@@ -1709,6 +2002,8 @@ export function parseEstimateText(rawText: string, options: ParseEstimateOptions
     warnings: mergeWarnings(warnings),
     extractionMethod: 'deterministic_parser',
     source: options.source,
+    documentKind: profile.kind,
+    documentKindLabel: profile.label,
     sourceHash: options.sourceHash || hashSourceText(text),
     documentStats: options.documentStats || {
       characters: options.rawCharacters ?? rawText.length,
@@ -2050,10 +2345,13 @@ function aiFailureWarning(configuredModel: string, failures: string[], apiKeyRej
 }
 
 
-function aiPrompt(): string {
+function aiPrompt(kind: DocumentKind = 'generic'): string {
+  const workOrder = kind === 'work-order';
   return [
     'You are an expert Construction Superintendent and Field Operations Manager for Hays + Sons Complete Restoration.',
-    'You receive ONE insurance restoration estimate (Xactimate, Symbility, carrier estimate, contractor bid or pasted scope text).',
+    workOrder
+      ? 'You receive ONE document: a work order or scope of work that is already written for the field (Hays + Sons, carrier, adjuster, property-management or subcontractor format).'
+      : 'You receive ONE document: an insurance restoration estimate (Xactimate, Symbility, carrier estimate, contractor bid, pasted scope text) or an existing field work order.',
     'Turn it into OPERATIONAL FIELD TRADE WORK ORDERS that on-site crews and subcontractors can execute.',
     '',
     'CONVERSION RULES (mandatory):',
@@ -2062,13 +2360,16 @@ function aiPrompt(): string {
     '3. PLAIN-ENGLISH FIELD ACTIONS. Rewrite insurance shorthand into verb-first physical labour instructions in the "instruction" field - e.g. "Msk and prep for paint - tape only" becomes "Apply high-tack painter\'s masking tape along all baseboard and casing perimeters"; "Remove tile floor covering - Additional labor" becomes "Chip away tile down to bare substrate, remove bonded thinset mortar, and grind the surface smooth".',
     '4. PRESERVE QUANTITIES. Keep the exact SF, LF, EA, CY, SY, GAL, HR measurements and room dimensions that the document states so crews can measure, cut and order material.',
     '5. ISOLATE BY TRADE CREW. Put every row under exactly one of these seven crews: "' + SEVEN_CREWS.join('", "') + '".',
+    workOrder
+      ? '6. THIS DOCUMENT IS ALREADY A WORK ORDER. Its rows have been written as field tasks and its headings may already name the crew or room. Keep that wording, keep the author\'s room names, and only clean up shorthand - do not replace a stated task with a different one, and never drop a stated task because it looks routine.'
+      : '6. The document may mix estimate rows with cover notes, adjuster comments and totals. Read the scope rows and ignore the prose.',
     '',
     'GROUNDING RULES (never break):',
-    '6. Extract only what is literally present in the document below. Never invent customers, addresses, claim numbers, totals, rooms, quantities or scope rows.',
-    '7. Never reuse example values, sample data or values from any other job. If a field is absent, return an empty string or empty array.',
-    '8. lineItems must come from the document scope/line-item rows; skip totals, taxes, O&P, permit fees, deductibles and depreciation rows.',
-    '9. "trades" must only describe crews and rooms that the document scope actually covers. Instructions may be rewritten for clarity, but they must stay based on scope rows that exist - keep the group to at most 8 rooms and 6 instructions per room.',
-    '10. Put credited, omitted or explicitly excluded scope in that trade\'s "exclusions" array so crews know what NOT to perform.',
+    '7. Extract only what is literally present in the document below. Never invent customers, addresses, claim numbers, totals, rooms, quantities or scope rows.',
+    '8. Never reuse example values, sample data or values from any other job. If a field is absent, return an empty string or empty array.',
+    '9. lineItems must come from the document scope/line-item rows; skip totals, taxes, O&P, permit fees, deductibles and depreciation rows.',
+    '10. "trades" must only describe crews and rooms that the document scope actually covers. Instructions may be rewritten for clarity, but they must stay based on scope rows that exist - keep the group to at most 8 rooms and 6 instructions per room.',
+    '11. Put credited, omitted or explicitly excluded scope in that trade\'s "exclusions" array so crews know what NOT to perform.',
     '',
     'Return JSON only, matching the requested schema. Empty arrays/strings are correct answers when the document lacks that information.'
   ].join('\n');
@@ -2076,13 +2377,64 @@ function aiPrompt(): string {
 
 const AI_STOPWORDS = new Set(['the', 'and', 'with', 'for', 'from', 'that', 'this', 'into', 'onto', 'over', 'under', 'per', 'all', 'any', 'new', 'existing', 'area', 'areas', 'item', 'items', 'room', 'rooms', 'each']);
 
+/**
+ * Crude suffix folding so a rewritten instruction still matches the document:
+ * paint/painted/painting, remove/removal/removing and ceiling/ceilings all fold
+ * to one form. Both sides of every comparison are folded, so the vocabulary only
+ * has to be self-consistent.
+ */
+function foldToken(token: string): string {
+  let word = token;
+  for (let pass = 0; pass < 2; pass++) {
+    const before = word;
+    if (word.length > 5 && /ations?$/.test(word)) word = word.replace(/ations?$/, '');
+    else if (word.length > 5 && /ings?$/.test(word)) word = word.replace(/ings?$/, '');
+    else if (word.length > 4 && /(?:ed|es)$/.test(word)) word = word.replace(/(?:ed|es)$/, '');
+    else if (word.length > 4 && /al$/.test(word)) word = word.replace(/al$/, '');
+    else if (word.length > 4 && /s$/.test(word) && !/(?:ss|us|is|as)$/.test(word)) word = word.replace(/s$/, '');
+    if (word === before) break;
+  }
+  if (word.length > 3 && /e$/.test(word)) word = word.replace(/e$/, '');
+  if (word.length > 4 && /([bdfglmnprt])\1$/.test(word)) word = word.slice(0, -1);
+  return word;
+}
+
 function tokenize(value: string): string[] {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9 ]+/g, ' ')
     .split(/\s+/)
-    .filter((token) => token.length >= 4 && !AI_STOPWORDS.has(token));
+    .filter((token) => token.length >= 4 && !AI_STOPWORDS.has(token))
+    .map(foldToken);
 }
+
+/**
+ * Field practice vocabulary. A crew instruction adds sentences the document never
+ * contains (masking, containment, negative air, leak testing), so these words are
+ * treated as recognised and the vocabulary that must trace back to the document is
+ * the subject matter: materials, rooms, fixtures and finishes.
+ */
+const FIELD_ACTION_VOCAB = new Set([
+  'apply', 'applied', 'coat', 'coats', 'painting', 'prime', 'primer', 'seal', 'sealant', 'caulk',
+  'sand', 'sanding', 'patch', 'float', 'skim', 'texture', 'feather', 'blend', 'match', 'mix',
+  'mortar', 'adhesive', 'grout', 'tape', 'mask', 'masking', 'protect', 'protection', 'cover',
+  'poly', 'plastic', 'containment', 'barrier', 'zipper', 'negative', 'scrubber', 'hepa', 'dust',
+  'vacuum', 'sweep', 'wipe', 'clean', 'cleaning', 'rinse', 'mop', 'sanitize', 'disinfect',
+  'deodorize', 'fog', 'haul', 'dispose', 'debris', 'dumpster', 'trailer', 'load', 'stage',
+  'store', 'label', 'photograph', 'document', 'verify', 'inspect', 'test', 'check', 'level',
+  'plumb', 'square', 'flush', 'shim', 'secure', 'fasten', 'screw', 'nail', 'staple', 'glue',
+  'install', 'reinstall', 'reset', 'replace', 'remove', 'removal', 'detach', 'disconnect',
+  'cut', 'trim', 'scrape', 'chisel', 'pry', 'notch', 'drill', 'hang', 'align', 'tear',
+  'demolish', 'demolition', 'salvage', 'reuse', 'cure', 'dry', 'moisture', 'humidity', 'before',
+  'after', 'during', 'until', 'allow', 'ensure', 'keep', 'hold', 'leave', 'provide', 'material',
+  'equipment', 'tool', 'tools', 'labor', 'labour', 'crew', 'subcontractor', 'supervisor',
+  'superintendent', 'standard', 'product', 'manufacturer', 'specification', 'recommend',
+  'required', 'never', 'always', 'avoid', 'prevent', 'maintain', 'protect', 'perimeter',
+  'transition', 'sequence', 'ready', 'complete', 'complete', 'final', 'touch', 'finish',
+  'smooth', 'sandable', 'substrate', 'sheathing', 'underlayment', 'vapor', 'gap', 'expansion',
+  'joint', 'seam', 'edge', 'bead', 'corner', 'penetration', 'fastener', 'nail', 'pattern',
+  'wall', 'casing', 'ceiling', 'spray'
+].flatMap((word) => tokenize(word)));
 
 /** Percentage of a candidate task's meaningful words that appear in the source document. */
 function documentSupport(candidate: string, documentTokens: Set<string>): number {
@@ -2090,6 +2442,24 @@ function documentSupport(candidate: string, documentTokens: Set<string>): number
   if (tokens.length === 0) return 0;
   const hits = tokens.filter((token) => documentTokens.has(token)).length;
   return hits / tokens.length;
+}
+
+/** Match the punctuation-free form both sides of a phrase lookup share. */
+function flattenForPhrase(value: string): string {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * True when the candidate reuses three consecutive words of the document, which
+ * proves the row was quoted rather than invented even if the rest is unfamiliar.
+ */
+function containsDocumentPhrase(candidate: string, flattenedDocument: string): boolean {
+  if (!flattenedDocument) return false;
+  const words = flattenForPhrase(candidate).split(' ').filter((word) => word.length >= 3);
+  for (let index = 0; index + 2 < words.length; index++) {
+    if (flattenedDocument.includes(words.slice(index, index + 3).join(' '))) return true;
+  }
+  return false;
 }
 
 interface AiPayload {
@@ -2121,12 +2491,32 @@ interface AiPayload {
  * Rewritten field instructions are allowed to differ in wording from the document
  * (that is the point of the conversion), so they are validated by tracing their
  * vocabulary back to the document instead of requiring an exact phrase match.
+ *
+ * Three tests pass an instruction, in falling order of confidence: it largely
+ * quotes the document; it borrows the document's subject matter ("kitchen",
+ * "drywall", "LVP") while adding standing field practice; or it is the field
+ * vocabulary with at most one word the document never uses.
  */
 function isGroundedInstruction(text: string, documentTokens: Set<string>): boolean {
   const tokens = tokenize(text);
   if (tokens.length === 0) return false;
-  const hits = tokens.filter((token) => documentTokens.has(token)).length;
-  return hits >= 2 && hits / tokens.length >= 0.2;
+  const documentHits = tokens.filter((token) => documentTokens.has(token)).length;
+  if (documentHits >= 2 && documentHits / tokens.length >= 0.2) return true;
+
+  const content = tokens.filter((token) => !FIELD_ACTION_VOCAB.has(token));
+  if (content.length > 0) {
+    const contentHits = content.filter((token) => documentTokens.has(token)).length;
+    if (contentHits >= 1 && contentHits / content.length >= 0.25) return true;
+  }
+
+  if (documentHits < 1) return false;
+  let known = 0;
+  let unfamiliar = 0;
+  for (const token of tokens) {
+    if (documentTokens.has(token) || FIELD_ACTION_VOCAB.has(token)) known++;
+    else unfamiliar++;
+  }
+  return unfamiliar <= 1 && known / tokens.length >= 0.6;
 }
 
 function cleanFieldText(value: unknown, maxLength = 300): string {
@@ -2134,13 +2524,23 @@ function cleanFieldText(value: unknown, maxLength = 300): string {
   return text.length >= 3 ? text.slice(0, maxLength) : '';
 }
 
+/**
+ * Resolve a model-supplied crew label to one of the staffed crews. Crew names and
+ * loose labels such as "Paint & Drywall Repair" or "Drying Equipment" both resolve,
+ * and anything else lands in General Restoration instead of being dropped.
+ */
 function normalizeTradeName(value: unknown): string {
-  const text = String(value ?? '').toLowerCase();
+  const text = String(value ?? '').trim();
   if (!text) return '';
-  return [...SEVEN_CREWS, GENERAL_TRADE].find((crew) => {
+  const lower = text.toLowerCase();
+  const exact = [...SEVEN_CREWS, GENERAL_TRADE].find((crew) => lower.includes(crew.toLowerCase()));
+  if (exact) return exact;
+  const byWord = [...SEVEN_CREWS, GENERAL_TRADE].find((crew) => {
     const crewWords = crew.toLowerCase().replace(/[^a-z ]+/g, ' ').split(/\s+/).filter((word) => word.length > 3);
-    return crewWords.some((word) => text.includes(word));
-  }) || '';
+    return crewWords.some((word) => lower.includes(word));
+  });
+  if (byWord) return byWord;
+  return matchTradeAlias(text) || GENERAL_TRADE;
 }
 
 function cleanCheckList(value: unknown, documentTokens: Set<string>, max = 6): string[] {
@@ -2173,13 +2573,29 @@ function mergeFieldPackage(
     ...section,
     rooms: section.rooms.map((room) => ({ roomName: room.roomName, instructions: [...room.instructions] }))
   }));
+  const baseTradeNames = new Set(base.map((entry) => entry.tradeName));
   let accepted = 0;
   let rejected = 0;
 
   for (const group of incoming) {
     const tradeName = normalizeTradeName(group?.tradeName);
     if (!tradeName) continue;
-    const section = sections.find((entry) => entry.tradeName === tradeName);
+    let section = sections.find((entry) => entry.tradeName === tradeName);
+    if (!section && tradeName === GENERAL_TRADE) {
+      // Work the seven crews do not cover (roofing, paving, fences, engineering)
+      // lands in General Restoration instead of being dropped.
+      const guide = TRADE_FIELD_GUIDES[GENERAL_TRADE];
+      section = {
+        tradeName: GENERAL_TRADE,
+        scopeSummary: guide.scopeSummary,
+        safetyProtocols: [...guide.safetyProtocols],
+        rooms: [],
+        materials: [...guide.materials],
+        qualityChecks: [...guide.qualityChecks],
+        exclusions: []
+      };
+      sections.push(section);
+    }
     if (!section) continue;
 
     const deterministicLimit = Math.max(6, section.rooms.reduce((sum, room) => sum + room.instructions.length, 0) * 2);
@@ -2220,6 +2636,13 @@ function mergeFieldPackage(
     section.materials = [...new Set([...section.materials, ...cleanCheckList(group?.materials, documentTokens, 8)])].slice(0, 8);
     section.qualityChecks = [...new Set([...section.qualityChecks, ...cleanCheckList(group?.qualityChecks, documentTokens)])].slice(0, 6);
     section.exclusions = [...new Set([...section.exclusions, ...cleanCheckList(group?.exclusions, documentTokens, 6)])].slice(0, 8);
+
+    // A crew or room the model named whose every instruction failed validation
+    // carries no work - drop the blank block instead of shipping it to the field.
+    section.rooms = section.rooms.filter((room) => room.instructions.length > 0);
+    if (section.rooms.length === 0 && !baseTradeNames.has(section.tradeName)) {
+      sections.splice(sections.indexOf(section), 1);
+    }
   }
 
   return { sections, accepted, rejected };
@@ -2258,9 +2681,9 @@ export async function enrichEstimateWithAi(
     contents.push({ inlineData: { mimeType: options.mimeType || 'application/pdf', data: options.pdfBase64 } });
   }
   if (options.text) {
-    contents.push({ text: `--- ESTIMATE DOCUMENT START ---\n${options.text.slice(0, 120_000)}\n--- ESTIMATE DOCUMENT END ---` });
+    contents.push({ text: `--- SOURCE DOCUMENT START ---\n${options.text.slice(0, 120_000)}\n--- SOURCE DOCUMENT END ---` });
   }
-  contents.push({ text: aiPrompt() });
+  contents.push({ text: aiPrompt(base.documentKind) });
 
   const startedAt = Date.now();
   const failures: string[] = [];
@@ -2318,6 +2741,7 @@ export async function enrichEstimateWithAi(
   const usedModel = outcome.model;
 
   const documentTokens = new Set(tokenize(options.text || ''));
+  const flattenedDocument = flattenForPhrase(options.text || '');
   const merged: EstimateExtraction = { ...base, warnings: [...base.warnings] };
   let rejectedItems = 0;
 
@@ -2350,7 +2774,10 @@ export async function enrichEstimateWithAi(
     if (description.length < 4 || description.replace(/[^A-Za-z]/g, '').length < 4) continue;
     const support = documentSupport(description, documentTokens);
     const hasQuantity = Boolean(item?.quantity);
-    if (support < 0.5 && !(hasQuantity && support >= 0.34)) {
+    // A row is trusted when it is quoted from the document, when most of its
+    // wording is the document's, or - for a measured row - when enough of it is.
+    const anchored = containsDocumentPhrase(description, flattenedDocument);
+    if (!anchored && support < 0.34 && !(hasQuantity && support >= 0.2)) {
       rejectedItems++;
       continue;
     }
@@ -2382,9 +2809,10 @@ export async function enrichEstimateWithAi(
   }
 
   const { groups, lineItems } = mapLinesToTrades(mergedLines.slice(0, 80));
+  const authoredWording = base.documentKind === 'work-order';
   for (const item of lineItems) {
     item.instruction = aiInstructions.get(scopeLineKey(item))
-      || buildFieldInstruction(item.description, item.quantity, item.unit, item.trade);
+      || buildFieldInstruction(item.description, item.quantity, item.unit, item.trade, authoredWording);
   }
   merged.lineItems = lineItems;
   merged.tradeBreakdown = groups;

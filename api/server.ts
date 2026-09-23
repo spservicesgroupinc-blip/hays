@@ -147,6 +147,9 @@ interface JobRecord {
   email?: string;
   claimNumber?: string;
   lossType?: string;
+  /** Which document produced the scope: a priced estimate or a written work order. */
+  documentKind?: string;
+  documentKindLabel?: string;
   totalEstimate?: string;
   notes?: string;
   scopeSummary?: string;
@@ -1761,6 +1764,8 @@ function toExtractedJobPayload(extraction: EstimateExtraction) {
     insuranceCarrier: extraction.insuranceCarrier,
     adjusterName: extraction.adjusterName,
     lossType: extraction.lossType,
+    documentKind: extraction.documentKind,
+    documentKindLabel: extraction.documentKindLabel,
     dateOfLoss: extraction.dateOfLoss,
     unitArea: extraction.unitArea,
     totalEstimate: extraction.totalEstimate,
@@ -1793,6 +1798,8 @@ function jobToExtractedPayload(job: JobRecord) {
     insuranceCarrier: '',
     adjusterName: '',
     lossType: job.lossType || 'Restoration',
+    documentKind: job.documentKind || '',
+    documentKindLabel: job.documentKindLabel || '',
     dateOfLoss: '',
     unitArea: job.scopeSummary || '',
     totalEstimate: job.totalEstimate || '',
@@ -1900,7 +1907,7 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       return res.status(422).json({
         success: false,
         method: extraction.extractionMethod,
-        error: 'No line-item scope could be read from this document, so no work orders were created. Upload the digital PDF export (not a scan) or paste the scope/line-item table.',
+        error: 'No scope could be read from this document, so no work orders were created. Upload either the digital PDF export of the Xactimate estimate or a work order that lists the work (not a scan without a text layer), or paste the scope/task text.',
         data,
         warnings: extraction.warnings
       });
@@ -1918,6 +1925,8 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       email: extraction.email,
       claimNumber: extraction.claimNumber,
       lossType: extraction.lossType || 'Restoration',
+      documentKind: extraction.documentKind,
+      documentKindLabel: extraction.documentKindLabel,
       totalEstimate: extraction.totalEstimate,
       notes: extraction.notes,
       scopeSummary: extraction.unitArea || 'Restoration Scope',
