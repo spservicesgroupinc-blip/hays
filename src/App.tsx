@@ -30,6 +30,13 @@ export default function App() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [accessDeniedError, setAccessDeniedError] = useState<string | null>(null);
 
+  // Parked PM session while a "view as subcontractor" preview is open
+  const [pmSession, setPmSession] = useState<{
+    user: User;
+    token: string | null;
+    tab: AppTab;
+  } | null>(null);
+
   // Preselection for Work Order Creator
   const [creatorPreselectedSub, setCreatorPreselectedSub] = useState<{
     id: string;
@@ -178,6 +185,12 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    // Signing out of a preview returns the PM to their own session instead of
+    // destroying it - the preview token is disposable, the PM login is not.
+    if (pmSession) {
+      handleExitSubPreview();
+      return;
+    }
     if (authToken) {
       try {
         await fetch('/api/auth/logout', {
@@ -233,21 +246,26 @@ export default function App() {
             return {
               ...item,
               status: res.status,
+              // A resubmitted photo starts a fresh review round: drop the old
+              // rejection so the crew does not keep seeing it after a reshoot.
+              verification: res.verification || 'Pending Review',
+              reviewNote: res.reviewNote || item.reviewNote,
               notes: res.notes,
               photoUrl: base64,
-              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              timestamp: new Date().toISOString()
             };
           }
           return item;
         }));
 
-        // Update Work Order progress stats
+        // Update Work Order progress stats. Status mirrors the server: photos only
+        // track progress, and the crew sign-off is what completes the work order.
         if (currentWorkOrder) {
           const updatedWo = {
             ...currentWorkOrder,
             completedItems: res.completedCount,
             totalItems: res.totalCount,
-            status: res.isComplete ? ('Completed' as const) : (res.completedCount > 0 ? ('In Progress' as const) : ('Open' as const))
+            status: res.workOrderStatus || (res.completedCount > 0 ? ('In Progress' as const) : ('Open' as const))
           };
           setCurrentWorkOrder(updatedWo);
           setWorkOrders(prev => prev.map(w => w.woId === updatedWo.woId ? updatedWo : w));
@@ -318,15 +336,36 @@ export default function App() {
     setCurrentTab('pm_creator');
   };
 
-  // Switch into that subcontractor's account/preview
-  const handleSwitchToSubView = (subUser: User, woId?: string) => {
+  // Switch into that subcontractor's portal as a published, non-destructive preview.
+  // The PM's own session is parked so the preview can be left again, and the server
+  // records who opened whose portal (see POST /api/pm/view-as-sub).
+  const handleSwitchToSubView = (subUser: User, woId?: string, previewToken?: string) => {
+    if (currentUser?.role === 'pm') {
+      setPmSession({ user: currentUser, token: authToken, tab: currentTab });
+    }
     setCurrentUser(subUser);
+    if (previewToken) {
+      setAuthToken(previewToken);
+    }
     if (woId) {
       setSelectedWoId(woId);
-      loadWorkOrderDetails(woId, authToken);
+      loadWorkOrdersList(previewToken || authToken, woId);
+    } else {
+      loadWorkOrdersList(previewToken || authToken);
     }
     setCurrentTab('subcontractor');
-    showToast(`Viewing Subcontractor Portal as ${subUser.name} (${subUser.company})`, 'success');
+    showToast(`Previewing the field portal as ${subUser.name} (${subUser.company})`, 'success');
+  };
+
+  // Leave the preview and hand the session back to the signed-in Project Manager
+  const handleExitSubPreview = () => {
+    if (!pmSession) return;
+    setCurrentUser(pmSession.user);
+    setAuthToken(pmSession.token);
+    setCurrentTab(pmSession.tab);
+    setPmSession(null);
+    loadWorkOrdersList(pmSession.token);
+    showToast(`Returned to the Project Manager view as ${pmSession.user.name}`, 'success');
   };
 
   // Start with an account login / create account page for subcontractors
@@ -356,6 +395,23 @@ export default function App() {
             </span>
             <span className="flex-1 text-white leading-snug">{toastMessage.text}</span>
           </div>
+        </div>
+      )}
+
+      {/* Preview banner: the PM is currently looking at a subcontractor portal */}
+      {pmSession && (
+        <div className="bg-amber-400 text-slate-950 px-4 py-2.5 flex items-center justify-center gap-3 text-[11px] font-black uppercase tracking-wider border-b-2 border-amber-600">
+          <span className="text-base">👁️</span>
+          <span>
+            Preview mode — you are viewing as {currentUser?.name} ({currentUser?.company}). Your own
+            actions are still logged under your PM account.
+          </span>
+          <button
+            onClick={handleExitSubPreview}
+            className="px-3 py-1.5 bg-slate-950 text-white rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-slate-800 transition-colors"
+          >
+            Return to PM view
+          </button>
         </div>
       )}
 
@@ -413,6 +469,7 @@ export default function App() {
             onOpenAuthModal={() => setIsAuthModalOpen(true)}
             onLogout={handleLogout}
             isMobileDeviceFrame={isMobileDeviceFrame}
+            isPreview={pmSession !== null}
           />
         )}
 

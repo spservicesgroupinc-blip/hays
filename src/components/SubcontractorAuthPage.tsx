@@ -20,6 +20,9 @@ interface SubcontractorAuthPageProps {
   onLoginSuccess: (user: User, token: string) => void;
 }
 
+/** Mirrors MIN_PASSWORD_LENGTH in api/server.ts. */
+const MIN_PASSWORD_LENGTH = 8;
+
 export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
   onLoginSuccess
 }) => {
@@ -36,11 +39,27 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
   const [registerRole, setRegisterRole] = useState<UserRole>('subcontractor');
   const [company, setCompany] = useState('');
   const [phone, setPhone] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [pmSignupRequiresCode, setPmSignupRequiresCode] = useState(false);
+  const [pmSignupClosed, setPmSignupClosed] = useState(false);
 
   // Status states
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
+
+  // Whether the deployment gates Project Manager self-registration behind an
+  // invite code - the server decides, the form only has to ask for it.
+  React.useEffect(() => {
+    safeFetchJson<any>('/api/auth/status')
+      .then(({ ok, data }) => {
+        if (ok && data) {
+          setPmSignupRequiresCode(Boolean(data.pmSignupRequiresCode));
+          setPmSignupClosed(Boolean(data.pmSignupClosed));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Standard Login (Unified for PMs & Subcontractors)
   const handleLogin = async (e: React.FormEvent) => {
@@ -86,8 +105,8 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
       setErrorMessage('Please enter your email address.');
       return;
     }
-    if (!password.trim() || password.length < 6) {
-      setErrorMessage('Password must be at least 6 characters.');
+    if (!password.trim() || password.length < MIN_PASSWORD_LENGTH) {
+      setErrorMessage(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
       return;
     }
 
@@ -101,7 +120,8 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
         role: registerRole,
         company: company.trim() || (registerRole === 'pm' ? 'Hays + Sons Restoration' : 'Trade Partner'),
         phone: phone.trim(),
-        password: password.trim()
+        password: password.trim(),
+        inviteCode: inviteCode.trim()
       })
     });
 
@@ -367,6 +387,37 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
                   </div>
                 </div>
 
+                {registerRole === 'pm' && pmSignupClosed && (
+                  <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-200 text-xs">
+                    Project Manager self-registration is switched off on this deployment. Ask an
+                    existing administrator to create your account, or sign in with the credentials
+                    you were given.
+                  </div>
+                )}
+
+                {registerRole === 'pm' && pmSignupRequiresCode && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1">
+                      Project Manager invite code *
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        id="input-reg-invite-code"
+                        type="text"
+                        required
+                        placeholder="Issued by Hays + Sons"
+                        value={inviteCode}
+                        onChange={e => setInviteCode(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-[#C81D25] focus:ring-1 focus:ring-[#C81D25] transition"
+                      />
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Administrator accounts are invite-only. Ask Hays + Sons IT for the code.
+                    </p>
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1">
                     Company Name
@@ -394,7 +445,7 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
                       id="input-reg-password"
                       type="password"
                       required
-                      placeholder="At least 6 characters"
+                      placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`}
                       value={password}
                       onChange={e => setPassword(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-[#C81D25] focus:ring-1 focus:ring-[#C81D25] transition"
@@ -405,7 +456,7 @@ export const SubcontractorAuthPage: React.FC<SubcontractorAuthPageProps> = ({
                 <button
                   id="btn-reg-submit"
                   type="submit"
-                  disabled={isLoading}
+                  disabled={isLoading || (registerRole === 'pm' && pmSignupClosed)}
                   className="w-full py-2.5 px-4 rounded-xl font-bold text-white bg-[#C81D25] hover:bg-[#A3161D] shadow-lg shadow-[#C81D25]/25 transition-all flex items-center justify-center gap-2 mt-2 disabled:opacity-60"
                 >
                   {isLoading ? (

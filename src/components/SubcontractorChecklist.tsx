@@ -17,10 +17,12 @@ import {
   ShieldAlert,
   Lock,
   ArrowRight,
-  ShieldCheck
+  ShieldCheck,
+  Eye
 } from 'lucide-react';
 import { WorkOrder, LineItem, User } from '../types';
 import { HaysLogo } from './HaysLogo';
+import { formatWhen } from '../utils/time';
 
 interface SubcontractorChecklistProps {
   workOrder: WorkOrder | null;
@@ -33,6 +35,8 @@ interface SubcontractorChecklistProps {
   accessDeniedError?: string | null;
   onSwitchToAssignedWo?: (woId: string) => void;
   onOpenAuthModal: () => void;
+  /** PM "view as subcontractor" preview: read-only, writes are refused server-side. */
+  isPreview?: boolean;
 }
 
 export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
@@ -45,7 +49,8 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
   currentUser,
   accessDeniedError,
   onSwitchToAssignedWo,
-  onOpenAuthModal
+  onOpenAuthModal,
+  isPreview = false
 }) => {
   const [showSignOffModal, setShowSignOffModal] = useState(false);
   const [signerName, setSignerName] = useState(currentUser?.name || '');
@@ -139,6 +144,10 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
   const completed = lineItems.filter(i => i.status === 'Completed').length;
   const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
   const isAllDone = total > 0 && completed === total;
+  // Only the crew's electronic signature certifies the work order - complete
+  // photo evidence on its own leaves the job open for sign-off.
+  const isSignedOff = Boolean(workOrder.signedAt);
+  const statusLabel = isSignedOff ? 'Completed' : (isAllDone ? 'Ready for Sign-Off' : workOrder.status);
 
   const handleFileChange = async (lineId: string, taskDesc: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -179,11 +188,11 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
                 {workOrder.woId}
               </span>
               <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${
-                workOrder.status === 'Completed'
+                isSignedOff
                   ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                   : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
               }`}>
-                {workOrder.status}
+                {statusLabel}
               </span>
             </div>
 
@@ -217,14 +226,42 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
         </div>
       </div>
 
-      {/* 2. SIGNED OFF BADGE (If completed) */}
-      {workOrder.status === 'Completed' && (
+      {/* Preview banner: a PM looking at the crew's screen cannot act as the crew */}
+      {isPreview && (
+        <div className="bg-amber-100 border border-amber-300 text-amber-950 rounded-xl p-3 flex items-center gap-2.5 mb-4 text-xs">
+          <Eye className="w-5 h-5 text-amber-700 shrink-0" />
+          <div>
+            <span className="font-bold block">Read-only preview</span>
+            <span className="text-amber-800 text-[11px]">
+              You are looking at this work order as the crew sees it. Photo uploads and sign-off are
+              disabled while previewing.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* 2. CERTIFICATION BADGE (only after the crew's electronic sign-off) */}
+      {isSignedOff && (
         <div className="bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-xl p-3 flex items-center gap-2.5 mb-4 text-xs">
           <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
           <div>
             <span className="font-bold block">Work Order Fully Certified</span>
             <span className="text-emerald-700 text-[11px]">
-              Signed off by {workOrder.signedBy || 'Subcontractor Lead'} {workOrder.signedAt ? `on ${workOrder.signedAt}` : ''}.
+              {workOrder.signedBy ? `Signed off by ${workOrder.signedBy}` : 'Signed off'}
+              {workOrder.signedAt ? ` on ${formatWhen(workOrder.signedAt)}` : ''}.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* 2a. AWAITING SIGN-OFF (every line item has a photo, but nobody has signed yet) */}
+      {!isSignedOff && isAllDone && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-xl p-3 flex items-center gap-2.5 mb-4 text-xs">
+          <Clock className="w-5 h-5 text-amber-600 shrink-0" />
+          <div>
+            <span className="font-bold block">All photos submitted - awaiting sign-off</span>
+            <span className="text-amber-700 text-[11px]">
+              Use "Sign Off &amp; Complete" below to certify this work order.
             </span>
           </div>
         </div>
@@ -371,7 +408,7 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
                   {isCompleted ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800">
                       <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                      <span>VERIFIED</span>
+                      <span>PHOTO ON FILE</span>
                     </span>
                   ) : isFlagged ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black bg-red-100 text-red-800">
@@ -391,6 +428,31 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
               {item.notes && (
                 <div className="mt-2.5 p-2 rounded-lg bg-slate-50 border border-slate-200 text-[11px] text-slate-600">
                   {item.notes}
+                </div>
+              )}
+
+              {/* The PM's reason for sending the photo back: without it the crew
+                  has to guess what was wrong. */}
+              {isFlagged && item.reviewNote && (
+                <div className="mt-2.5 p-2.5 rounded-lg bg-red-50 border border-red-200 text-[11px] text-red-900">
+                  <strong className="block text-[10px] uppercase tracking-wider text-red-700">
+                    Reshoot requested{item.reviewedBy ? ` by ${item.reviewedBy}` : ''}
+                  </strong>
+                  {item.reviewNote}
+                </div>
+              )}
+
+              {/* PMs decide on the photo after it is uploaded */}
+              {isCompleted && item.verification === 'Pending Review' && (
+                <div className="mt-2.5 p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-900">
+                  Submitted {item.timestamp ? formatWhen(item.timestamp) : ''} — waiting for the
+                  Project Manager's review.
+                </div>
+              )}
+
+              {isCompleted && item.verification === 'Approved' && (
+                <div className="mt-2.5 p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-900">
+                  Photo approved{item.reviewedBy ? ` by ${item.reviewedBy}` : ''}.
                 </div>
               )}
 
@@ -418,17 +480,26 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
                 {/* Finger-Friendly Camera Button */}
                 <label 
                   htmlFor={`file-input-${item.lineId}`}
-                  className={`inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl font-bold text-xs transition cursor-pointer min-h-[42px] active:scale-95 ${
-                    isItemLoading 
-                      ? 'bg-slate-200 text-slate-500 cursor-not-allowed' 
-                      : (isCompleted
-                        ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300'
-                        : (isFlagged
-                          ? 'bg-red-700 hover:bg-red-800 text-white shadow-sm'
-                          : 'bg-[#C81D25] hover:bg-[#A8151D] text-white shadow-sm'))
+                  className={`inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl font-bold text-xs transition min-h-[42px] ${
+                    isPreview
+                      ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
+                      : `cursor-pointer active:scale-95 ${
+                          isItemLoading
+                            ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                            : (isCompleted
+                              ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300'
+                              : (isFlagged
+                                ? 'bg-red-700 hover:bg-red-800 text-white shadow-sm'
+                                : 'bg-[#C81D25] hover:bg-[#A8151D] text-white shadow-sm'))
+                        }`
                   }`}
                 >
-                  {isItemLoading ? (
+                  {isPreview ? (
+                    <>
+                      <Eye className="w-4 h-4" />
+                      <span>Preview only</span>
+                    </>
+                  ) : isItemLoading ? (
                     <>
                       <Clock className="w-3.5 h-3.5 animate-spin text-[#C81D25]" />
                       <span>Uploading...</span>
@@ -450,7 +521,7 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
                     type="file"
                     accept="image/*"
                     capture="environment"
-                    disabled={isItemLoading}
+                    disabled={isItemLoading || isPreview}
                     onChange={(e) => handleFileChange(item.lineId, item.taskDescription, e)}
                     className="hidden"
                   />
@@ -467,29 +538,33 @@ export const SubcontractorChecklist: React.FC<SubcontractorChecklistProps> = ({
         <div className="max-w-xl mx-auto flex items-center justify-between gap-3">
           <div className="text-xs">
             <div className="font-bold text-slate-900">
-              {completed} of {total} verified
+              {completed} of {total} photos on file
             </div>
             <div className="text-[10px] text-slate-500">
-              {isAllDone 
-                ? 'Ready for sign-off' 
-                : `${total - completed} photos left`}
+              {isSignedOff
+                ? 'Signed off & complete'
+                : isAllDone
+                  ? 'Ready for sign-off'
+                  : `${total - completed} photos left`}
             </div>
           </div>
 
           <button
             id="btn-sign-off"
             onClick={() => setShowSignOffModal(true)}
-            disabled={!isAllDone || workOrder.status === 'Completed'}
+            disabled={!isAllDone || isSignedOff || isPreview}
             className={`px-4 py-2.5 rounded-xl font-bold text-xs transition shadow-sm flex items-center gap-1.5 min-h-[42px] active:scale-95 ${
-              workOrder.status === 'Completed'
-                ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-default'
-                : (isAllDone
-                  ? 'bg-[#C81D25] hover:bg-[#A8151D] text-white shadow-red-600/30'
-                  : 'bg-slate-200 text-slate-400 cursor-not-allowed')
+              isPreview
+                ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                : (isSignedOff
+                  ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-default'
+                  : (isAllDone
+                    ? 'bg-[#C81D25] hover:bg-[#A8151D] text-white shadow-red-600/30'
+                    : 'bg-slate-200 text-slate-400 cursor-not-allowed'))
             }`}
           >
             <FileCheck2 className="w-4 h-4" />
-            <span>{workOrder.status === 'Completed' ? 'Signed Off' : 'Sign Off & Complete'}</span>
+            <span>{isPreview ? 'Preview Only' : (isSignedOff ? 'Signed Off' : 'Sign Off & Complete')}</span>
           </button>
         </div>
       </div>

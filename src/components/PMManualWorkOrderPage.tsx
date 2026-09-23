@@ -57,8 +57,9 @@ export const PMManualWorkOrderPage: React.FC<PMManualWorkOrderPageProps> = ({
         if (jobsResult.data.jobs[0]) setJobId(jobsResult.data.jobs[0].id);
       }
       if (subsResult.ok && Array.isArray(subsResult.data?.subcontractors)) {
+        // Deliberately no default crew: picking "whoever is first" silently handed
+        // work to the wrong trade. The PM must choose.
         setSubcontractors(subsResult.data.subcontractors);
-        if (subsResult.data.subcontractors[0]) setAssignedSubId(subsResult.data.subcontractors[0].id);
       }
     });
   }, [authToken]);

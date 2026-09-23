@@ -218,7 +218,9 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
 
         return {
           tradeName: tg.tradeName,
-          subId: matched?.id || subcontractors[0]?.id || '',
+          // No fallback to an unrelated crew: an unmatched trade stays unassigned
+          // until the PM picks somebody.
+          subId: matched?.id || '',
           scheduledDate: new Date().toISOString().split('T')[0],
           tasks: tg.tasks,
           isCreated: false
@@ -248,9 +250,15 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
 
       const updated = [...tradeAssignments];
 
+      // A trade with no crew is skipped (not silently assigned elsewhere) and
+      // reported, so the PM can dispatch it deliberately.
+      const unassigned = updated.filter(item => !item.isCreated && !item.subId);
+      unassigned.forEach(item => failures.push(`${item.tradeName}: no crew assigned — skipped.`));
+
       for (let i = 0; i < updated.length; i++) {
         const item = updated[i];
         if (item.isCreated) continue;
+        if (!item.subId) continue;
 
         const sub = subcontractors.find(s => s.id === item.subId);
 
@@ -550,8 +558,13 @@ export const PMWorkOrderCreator: React.FC<PMWorkOrderCreatorProps> = ({
                             copy[idx].subId = e.target.value;
                             setTradeAssignments(copy);
                           }}
-                          className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 font-semibold focus:outline-none focus:ring-1 focus:ring-[#C81D25]"
+                          className={`border rounded-lg px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-[#C81D25] ${
+                            assignment.subId
+                              ? 'bg-slate-50 border-slate-200 text-slate-900'
+                              : 'bg-amber-50 border-amber-300 text-amber-900'
+                          }`}
                         >
+                          <option value="">— Select a crew —</option>
                           {subcontractors.map((s) => (
                             <option key={s.id} value={s.id}>
                               {s.company} ({s.trade})

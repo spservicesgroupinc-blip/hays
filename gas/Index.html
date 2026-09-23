@@ -40,6 +40,14 @@
 </head>
 <body class="bg-slate-100 text-slate-900 min-h-screen pb-24 antialiased selection:bg-emerald-500 selection:text-white">
 
+  <!-- Legacy interface banner: users must know this is not the main FieldProof app -->
+  <div id="legacyInterfaceBanner" role="alert" style="background-color:#7f1d1d;color:#ffffff;border-bottom:3px solid #fca5a5;padding:10px 16px;text-align:center;font-size:13px;line-height:1.5;">
+    <strong style="font-weight:800;">⚠️ Legacy Interface — Apps Script / Google Sheets UI</strong>
+    <div style="margin-top:3px;color:#fee2e2;font-weight:500;">
+      This page is the legacy Apps Script + Google Sheets interface for FieldProof. The main FieldProof app is the supported product — use it for all work orders, photos, and sign-offs.
+    </div>
+  </div>
+
   <!-- Toast Notification -->
   <div id="toast" class="fixed top-4 left-1/2 -translate-x-1/2 z-50 transform transition-all duration-300 opacity-0 pointer-events-none translate-y-[-20px] max-w-sm w-11/12">
     <div id="toastInner" class="bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 border border-slate-700 text-sm font-medium">
@@ -352,17 +360,37 @@
         google.script.run
           .withSuccessHandler(function(res) {
             hideLoader();
-            if (res && res.success) {
-              renderWorkOrder(res.workOrder, res.lineItems);
-            } else {
-              showToast(res ? res.error : 'Work order not found', '❌');
+
+            if (!res || !res.success) {
+              showToast((res && res.error) || 'Unable to read the shared spreadsheet.', '❌');
+              return;
             }
+
+            // fetchDatabaseState() returns every row; find this work order in
+            // workOrders and take its rows from the lineItems map (keyed by
+            // uppercase woId), matching the shape Code.gs actually returns.
+            var targetId = String(woId || '').trim().toUpperCase();
+            var orders = res.workOrders || [];
+            var wo = null;
+            for (var i = 0; i < orders.length; i++) {
+              if (String(orders[i].woId || '').trim().toUpperCase() === targetId) {
+                wo = orders[i];
+                break;
+              }
+            }
+
+            if (!wo) {
+              showToast('Work order ' + woId + ' was not found in the spreadsheet.', '❌');
+              return;
+            }
+
+            renderWorkOrder(wo, (res.lineItems && res.lineItems[targetId]) || []);
           })
           .withFailureHandler(function(err) {
             hideLoader();
-            showToast('Error: ' + err.message, '❌');
+            showToast('Error: ' + ((err && err.message) ? err.message : err), '❌');
           })
-          .getWorkOrderData(woId);
+          .fetchDatabaseState();
       } else {
         // Not inside Apps Script runtime
         setTimeout(function() {
@@ -487,6 +515,14 @@
         var base64Data = e.target.result;
         var mimeType = file.type || 'image/jpeg';
 
+        // uploadAndVerifyPhoto() also needs the task text and the sub's name.
+        var item = null;
+        for (var i = 0; i < currentLineItems.length; i++) {
+          if (currentLineItems[i].lineId === lineId) { item = currentLineItems[i]; break; }
+        }
+        var taskDescription = item ? item.taskDescription : lineId;
+        var subcontractorName = (currentWoData && currentWoData.subName) ? currentWoData.subName : '';
+
         if (typeof google !== 'undefined' && google.script && google.script.run) {
           google.script.run
             .withSuccessHandler(function(res) {
@@ -501,7 +537,7 @@
               hideLoader();
               showToast('Error: ' + err.message, '❌');
             })
-            .submitLineItemPhoto(lineId, base64Data, mimeType);
+            .uploadAndVerifyPhoto(lineId, taskDescription, base64Data, mimeType, subcontractorName);
         } else {
           // Fallback simulation outside GAS
           setTimeout(function() {
@@ -588,7 +624,7 @@
             hideLoader();
             showToast('Error: ' + err.message, '❌');
           })
-          .completeWorkOrder(currentWoData.woId, signerName);
+          .signOffWorkOrder(currentWoData.woId, signerName);
       } else {
         setTimeout(function() {
           hideLoader();
@@ -660,6 +696,11 @@
         return;
       }
 
+      // createWorkOrder() in Code.gs takes 8 arguments. This legacy form has no
+      // email field, so subEmail goes across as an empty string.
+      var subEmail = '';
+      var metadata = { createdBy: 'Apps Script', source: 'gas-legacy-ui' };
+
       showLoader('Creating Work Order in Google Sheets...');
 
       if (typeof google !== 'undefined' && google.script && google.script.run) {
@@ -676,7 +717,7 @@
             hideLoader();
             showToast('Error: ' + err.message, '❌');
           })
-          .createWorkOrder(project, unit, subName, subPhone, date, lineItemsArray);
+          .createWorkOrder(project, unit, subName, subPhone, subEmail, date, lineItemsArray, metadata);
       } else {
         // Fallback simulation
         setTimeout(function() {

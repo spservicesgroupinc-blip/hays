@@ -43,6 +43,8 @@ interface SubcontractorPortalProps {
   showJobListOnly?: boolean;
   /** Opens a work order from the assigned jobs list page. */
   onOpenJobFromList?: (woId: string) => void;
+  /** PM "view as crew" preview: the portal is read-only and says so. */
+  isPreview?: boolean;
 }
 
 export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
@@ -59,7 +61,8 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
   onOpenAuthModal,
   onLogout,
   showJobListOnly = false,
-  onOpenJobFromList
+  onOpenJobFromList,
+  isPreview = false
 }) => {
   // If user is currently inspecting a specific work order, they can toggle back to view their job list
   const [activeWoId, setActiveWoId] = useState<string | null>(selectedWo?.woId || null);
@@ -180,6 +183,7 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
             accessDeniedError={accessDeniedError}
             onSwitchToAssignedWo={(woId) => handleOpenJob(woId)}
             onOpenAuthModal={onOpenAuthModal}
+            isPreview={isPreview}
           />
         </div>
       ) : (
@@ -219,7 +223,9 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
             <div className="space-y-2.5">
               {myAssignedJobs.map((wo) => {
                 const pct = wo.totalItems > 0 ? Math.round((wo.completedItems / wo.totalItems) * 100) : 0;
-                const isComplete = wo.status === 'Completed' || pct === 100;
+                const isSignedOff = Boolean(wo.signedAt);
+                const isReadyForSignOff = !isSignedOff && pct === 100;
+                const statusLabel = isSignedOff ? 'Signed Off' : (isReadyForSignOff ? 'Awaiting Sign-Off' : wo.status);
 
                 return (
                   <div
@@ -234,13 +240,13 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
                           {wo.woId}
                         </span>
                         <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${
-                          isComplete
+                          isSignedOff
                             ? 'bg-emerald-100 text-emerald-800'
-                            : (wo.status === 'In Progress'
+                            : (wo.status === 'In Progress' || isReadyForSignOff
                               ? 'bg-amber-100 text-amber-800'
                               : 'bg-slate-100 text-slate-700')
                         }`}>
-                          {wo.status}
+                          {statusLabel}
                         </span>
                       </div>
 
@@ -266,7 +272,7 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
                       <div className="flex justify-between text-[11px] font-bold">
                         <span className="text-slate-500">Progress</span>
                         <span className={pct === 100 ? 'text-emerald-600' : 'text-slate-800'}>
-                          {wo.completedItems}/{wo.totalItems} Verified ({pct}%)
+                          {wo.completedItems}/{wo.totalItems} photos ({pct}%)
                         </span>
                       </div>
                       <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
@@ -282,7 +288,7 @@ export const SubcontractorPortal: React.FC<SubcontractorPortalProps> = ({
                     {/* Open CTA */}
                     <div className="flex items-center justify-end pt-1">
                       <div className="flex items-center gap-1 text-xs font-bold text-[#C81D25]">
-                        <span>{isComplete ? 'View Job' : 'Open Checklist'}</span>
+                        <span>{isSignedOff ? 'View Job' : 'Open Checklist'}</span>
                         <ChevronRight className="w-4 h-4" />
                       </div>
                     </div>

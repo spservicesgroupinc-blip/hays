@@ -105,6 +105,58 @@ function doGet(e) {
   }
 }
 
+// ----------------------------------------------------------------------------
+// CREDENTIAL HELPERS
+// ----------------------------------------------------------------------------
+/**
+ * Hashes a password for storage in the roster sheets. Google Sheets cells are
+ * readable by anyone with file access, so raw passwords are never written;
+ * digests use a "sha256:" prefix so the FieldProof server can tell them apart
+ * from the pbkdf2 hashes it maintains locally.
+ */
+function hashPassword_(password) {
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    String(password || ''),
+    Utilities.Charset.UTF_8
+  );
+  var hex = digest.map(function (b) {
+    var v = (b < 0 ? b + 256 : b).toString(16);
+    return v.length === 1 ? '0' + v : v;
+  }).join('');
+  return 'sha256:' + hex;
+}
+
+function isHashedPassword_(value) {
+  return String(value || '').indexOf('sha256:') === 0;
+}
+
+function passwordMatches_(storedValue, suppliedPassword) {
+  var stored = String(storedValue || '').trim();
+  var supplied = String(suppliedPassword || '').trim();
+  if (!stored || !supplied) return false;
+  if (isHashedPassword_(stored)) return stored === hashPassword_(supplied);
+  // Legacy rows still hold a plaintext credential; match it so it can be
+  // upgraded to a digest on first successful login (see authenticateUser).
+  return stored === supplied;
+}
+
+// ----------------------------------------------------------------------------
+// REQUEST GUARD
+// ----------------------------------------------------------------------------
+/**
+ * Returns the shared secret expected on write requests, or '' when the
+ * deployment does not require one. Set the APPS_SCRIPT_SYNC_KEY script property
+ * to stop anyone who learns the /exec URL from deleting or rewriting data.
+ */
+function getSyncKey_() {
+  try {
+    return String(PropertiesService.getScriptProperties().getProperty('APPS_SCRIPT_SYNC_KEY') || '').trim();
+  } catch (err) {
+    return '';
+  }
+}
+
 /**
  * Handles incoming POST requests (API calls for work orders, subcontractors, photo verification).
  */
@@ -113,6 +165,17 @@ function doPost(e) {
     initDatabase();
     var contents = e.postData ? JSON.parse(e.postData.contents) : {};
     var action = contents.action || (e.parameter ? e.parameter.action : '');
+
+    var requiredKey = getSyncKey_();
+    if (requiredKey && action !== 'ping') {
+      var providedKey = String(contents.syncKey || (e.parameter ? e.parameter.syncKey : '') || '').trim();
+      if (providedKey !== requiredKey) {
+        return ContentService.createTextOutput(JSON.stringify({
+          success: false,
+          error: 'Unauthorized: missing or invalid sync key.'
+        })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
 
     var responseData = {};
 
@@ -180,7 +243,19 @@ function doPost(e) {
           contents.taskDescription,
           contents.base64Image,
           contents.mimeType,
-          contents.subcontractorName
+          contents.subcontractorName,
+          contents.verification,
+          contents.reviewNote
+        );
+        break;
+
+      case 'updateLineItemStatus':
+        responseData = updateLineItemStatus(
+          contents.lineId,
+          contents.status,
+          contents.verification,
+          contents.notes,
+          contents.reopen
         );
         break;
 
@@ -298,7 +373,7 @@ function initDatabase() {
   var lineSheet = ss.getSheetByName(CONFIG.SHEET_LINE_ITEMS);
   var lineHeaders = [
     'Line ID', 'WO ID', 'Task Description', 'Status', 
-    'Photo Drive URL', 'AI Verification Verdict', 'AI Feedback', 'Timestamp'
+    'Photo Drive URL', 'Verification Verdict', 'Verification Notes', 'Timestamp'
   ];
   if (!lineSheet) {
     lineSheet = ss.insertSheet(CONFIG.SHEET_LINE_ITEMS);
@@ -337,7 +412,7 @@ function initDatabase() {
   var actSheet = ss.getSheetByName(CONFIG.SHEET_ACTIVITY_LOG);
   var actHeaders = [
     'Log ID', 'Timestamp', 'Event Type', 'Subcontractor', 
-    'Company', 'WO ID', 'Task Description', 'AI Verdict', 'Photo URL'
+    'Company', 'WO ID', 'Task Description', 'Verification Verdict', 'Photo URL'
   ];
   if (!actSheet) {
     actSheet = ss.insertSheet(CONFIG.SHEET_ACTIVITY_LOG);
@@ -396,7 +471,9 @@ function registerSubcontractor(company, name, trade, email, phone, password) {
   var cleanEmail = String(email || '').trim().toLowerCase();
   var dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
   var subId = 'SUB-' + (Math.floor(1000 + Math.random() * 9000));
-  var pwd = String(password || '').trim() || Utilities.getUuid().slice(0, 12);
+  // Never invent a credential and never store the raw value: FieldProof keeps
+  // its own salted hash, and roster sheets only ever hold a digest.
+  var storedPwd = String(password || '').trim() ? hashPassword_(password) : '';
 
   // Check if subcontractor already exists by email
   var existingRow = -1;
@@ -418,7 +495,9 @@ function registerSubcontractor(company, name, trade, email, phone, password) {
     subSheet.getRange(existingRow, 4).setValue(name || '');
     subSheet.getRange(existingRow, 6).setValue(phone || '');
     subSheet.getRange(existingRow, 8).setValue('Active');
-    subSheet.getRange(existingRow, 9).setValue(pwd);
+    if (storedPwd) {
+      subSheet.getRange(existingRow, 9).setValue(storedPwd);
+    }
   } else {
     // Append new subcontractor row
     subSheet.appendRow([
@@ -430,7 +509,7 @@ function registerSubcontractor(company, name, trade, email, phone, password) {
       phone || '',
       dateStr,
       'Active',
-      pwd
+      storedPwd
     ]);
   }
 
@@ -457,7 +536,7 @@ function registerProjectManager(name, email, company, phone, password) {
   var cleanEmail = String(email || '').trim().toLowerCase();
   var dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
   var pmId = 'PM-' + (Math.floor(1000 + Math.random() * 9000));
-  var pwd = String(password || '').trim() || Utilities.getUuid().slice(0, 12);
+  var storedPwd = String(password || '').trim() ? hashPassword_(password) : '';
 
   // Check if Project Manager already exists by email
   var existingRow = -1;
@@ -478,7 +557,9 @@ function registerProjectManager(name, email, company, phone, password) {
     pmSheet.getRange(existingRow, 4).setValue(company || 'Hays + Sons Restoration');
     pmSheet.getRange(existingRow, 5).setValue(phone || '');
     pmSheet.getRange(existingRow, 7).setValue('Active');
-    pmSheet.getRange(existingRow, 8).setValue(pwd);
+    if (storedPwd) {
+      pmSheet.getRange(existingRow, 8).setValue(storedPwd);
+    }
   } else {
     // Append new PM row
     pmSheet.appendRow([
@@ -489,7 +570,7 @@ function registerProjectManager(name, email, company, phone, password) {
       phone || '',
       dateStr,
       'Active',
-      pwd
+      storedPwd
     ]);
   }
 
@@ -526,7 +607,10 @@ function authenticateUser(email, password) {
       var rowEmail = String(pmData[m][2] || '').trim().toLowerCase();
       if (rowEmail === cleanEmail) {
         var rowPass = String(pmData[m][7] || '').trim();
-        if (rowPass === cleanPass) {
+        if (passwordMatches_(rowPass, cleanPass)) {
+          if (rowPass && !isHashedPassword_(rowPass)) {
+            pmSheet.getRange(m + 1, 8).setValue(hashPassword_(cleanPass));
+          }
           return {
             success: true,
             user: {
@@ -554,7 +638,10 @@ function authenticateUser(email, password) {
       var sEmail = String(subData[k][4] || '').trim().toLowerCase();
       if (sEmail === cleanEmail) {
         var sPass = String(subData[k][8] || '').trim();
-        if (sPass === cleanPass) {
+        if (passwordMatches_(sPass, cleanPass)) {
+          if (sPass && !isHashedPassword_(sPass)) {
+            subSheet.getRange(k + 1, 9).setValue(hashPassword_(cleanPass));
+          }
           return {
             success: true,
             user: {
@@ -703,7 +790,7 @@ function createJob(job) {
 /**
  * Uploads a subcontractor photo to Google Drive and updates the sheet.
  */
-function uploadAndVerifyPhoto(lineId, taskDescription, base64Image, mimeType, subcontractorName) {
+function uploadAndVerifyPhoto(lineId, taskDescription, base64Image, mimeType, subcontractorName, verification, reviewNote) {
   initDatabase();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var lineSheet = ss.getSheetByName(CONFIG.SHEET_LINE_ITEMS);
@@ -741,13 +828,17 @@ function uploadAndVerifyPhoto(lineId, taskDescription, base64Image, mimeType, su
     throw new Error('Line item ' + lineId + ' not found in database.');
   }
 
+  // Line item status only: the photo is on file. Completions of the work order
+  // itself happen exclusively through signOffWorkOrder.
   var newStatus = 'Completed';
   var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
 
-  lineSheet.getRange(targetRow, 4).setValue(newStatus);         // Status
-  lineSheet.getRange(targetRow, 5).setValue(photoUrl);          // Photo Drive URL
-  lineSheet.getRange(targetRow, 6).setValue('PASS');             // Verification
-  lineSheet.getRange(targetRow, 7).setValue('Photo verified');   // Notes
+  lineSheet.getRange(targetRow, 4).setValue(newStatus);          // Status
+  lineSheet.getRange(targetRow, 5).setValue(photoUrl);           // Photo Drive URL
+  // Verification: no automated check runs, so the row records the human review
+  // state. A replacement photo always starts a fresh review round.
+  lineSheet.getRange(targetRow, 6).setValue(verification || 'Pending Review');
+  lineSheet.getRange(targetRow, 7).setValue(reviewNote || 'Photo received - awaiting PM review');
   lineSheet.getRange(targetRow, 8).setValue(nowStr);             // Timestamp
 
   // 3. Recalculate Work Order overall progress
@@ -760,7 +851,7 @@ function uploadAndVerifyPhoto(lineId, taskDescription, base64Image, mimeType, su
     '',
     targetWoId,
     taskDescription,
-    'PASS',
+    '',
     photoUrl
   );
 
@@ -778,7 +869,7 @@ function uploadAndVerifyPhoto(lineId, taskDescription, base64Image, mimeType, su
 /**
  * Records electronic signature sign-off for completed work orders.
  */
-function signOffWorkOrder(woId, signatureName) {
+function signOffWorkOrder(woId, signatureName, signedAt) {
   initDatabase();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var woSheet = ss.getSheetByName(CONFIG.SHEET_WORK_ORDERS);
@@ -797,18 +888,57 @@ function signOffWorkOrder(woId, signatureName) {
     throw new Error('Work Order ' + woId + ' not found.');
   }
 
-  var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  if (String(data[targetRow - 1][11] || '').trim()) {
+    throw new Error('Work Order ' + woId + ' was already signed off on ' + data[targetRow - 1][11] + '.');
+  }
+
+  var signerName = String(signatureName || '').trim();
+  if (!signerName) {
+    throw new Error('A signer name is required to sign off ' + woId + '.');
+  }
+
+  // Every line item must carry its photo before the work order can be certified.
+  var lineData = lineSheet.getDataRange().getValues();
+  var totalItems = 0;
+  var incompleteItems = 0;
+  for (var l = 1; l < lineData.length; l++) {
+    if (String(lineData[l][1]).trim() === String(woId).trim()) {
+      totalItems++;
+      if (String(lineData[l][3]).trim() !== 'Completed') {
+        incompleteItems++;
+      }
+    }
+  }
+
+  if (totalItems === 0) {
+    throw new Error('Work Order ' + woId + ' has no line items to sign off.');
+  }
+
+  if (incompleteItems > 0) {
+    throw new Error('Cannot sign off ' + woId + ': ' + incompleteItems + ' of ' + totalItems + ' line items still need a photo.');
+  }
+
+  // The app signs off with an ISO instant so the certification carries no
+  // ambiguity; sign-offs made from the Sheets menu keep the local display format.
+  var signedAtIso = '';
+  if (signedAt) {
+    var parsedSignedAt = new Date(signedAt);
+    if (!isNaN(parsedSignedAt.getTime())) {
+      signedAtIso = parsedSignedAt.toISOString();
+    }
+  }
+  var nowStr = signedAtIso || Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
   woSheet.getRange(targetRow, 8).setValue('Completed'); // Status
-  woSheet.getRange(targetRow, 11).setValue(signatureName || 'Subcontractor Lead'); // Signed By
+  woSheet.getRange(targetRow, 11).setValue(signerName); // Signed By
   woSheet.getRange(targetRow, 12).setValue(nowStr); // Signed At
 
-  logActivity_('sub_signed_off', signatureName, '', woId, 'Electronic sign-off executed. Work Order Completed.', '');
+  logActivity_('sub_signed_off', signerName, '', woId, 'Electronic sign-off executed. Work Order Completed.', '');
 
   return {
     success: true,
     woId: woId,
     status: 'Completed',
-    signedBy: signatureName,
+    signedBy: signerName,
     signedAt: nowStr
   };
 }
@@ -880,11 +1010,16 @@ function recalculateWorkOrderProgress_(woId) {
   }
 
   var isComplete = (total > 0 && completed === total);
-  var newStatus = isComplete ? 'Completed' : (completed > 0 ? 'In Progress' : 'Open');
+  // Photo progress never completes a work order: the crew's sign-off does, so an
+  // unsigned row stays "In Progress" no matter how many photos are on file.
+  var newStatus = completed > 0 ? 'In Progress' : 'Open';
 
   var woData = woSheet.getDataRange().getValues();
   for (var j = 1; j < woData.length; j++) {
     if (String(woData[j][0]).trim() === String(woId).trim()) {
+      if (String(woData[j][11] || '').trim()) {
+        newStatus = 'Completed'; // Already signed off - keep the certification.
+      }
       woSheet.getRange(j + 1, 8).setValue(newStatus);
       woSheet.getRange(j + 1, 9).setValue(total);
       woSheet.getRange(j + 1, 10).setValue(completed);
@@ -897,6 +1032,70 @@ function recalculateWorkOrderProgress_(woId) {
     completedItems: completed,
     isComplete: isComplete,
     status: newStatus
+  };
+}
+
+/**
+ * Records a project manager's review decision for one line item photo. A
+ * rejection returns the line to "Flagged" so the crew must re-shoot it, and
+ * `reopen` clears a previous sign-off so the work order has to be re-certified.
+ */
+function updateLineItemStatus(lineId, status, verification, notes, reopen) {
+  initDatabase();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var lineSheet = ss.getSheetByName(CONFIG.SHEET_LINE_ITEMS);
+
+  if (!lineId) throw new Error('lineId is required');
+  if (!status) throw new Error('status is required');
+
+  var data = lineSheet.getDataRange().getValues();
+  var targetRow = -1;
+  var targetWoId = '';
+
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(lineId).trim()) {
+      targetRow = i + 1;
+      targetWoId = String(data[i][1]).trim();
+      break;
+    }
+  }
+
+  if (targetRow === -1) {
+    throw new Error('Line item ' + lineId + ' not found in database.');
+  }
+
+  var nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  lineSheet.getRange(targetRow, 4).setValue(status);
+  lineSheet.getRange(targetRow, 6).setValue(verification || '');
+  if (typeof notes === 'string' && notes) {
+    lineSheet.getRange(targetRow, 7).setValue(notes);
+  }
+  lineSheet.getRange(targetRow, 8).setValue(nowStr);
+
+  if (reopen) {
+    var woSheet = ss.getSheetByName(CONFIG.SHEET_WORK_ORDERS);
+    var woData = woSheet.getDataRange().getValues();
+    for (var j = 1; j < woData.length; j++) {
+      if (String(woData[j][0]).trim() === targetWoId) {
+        woSheet.getRange(j + 1, 11).setValue('');  // Signed By
+        woSheet.getRange(j + 1, 12).setValue('');  // Signed At
+        break;
+      }
+    }
+    logActivity_('wo_reopened_by_pm', '', '', targetWoId, 'Sign-off withdrawn after a rejected photo', '', '');
+  }
+
+  var progress = recalculateWorkOrderProgress_(targetWoId);
+
+  return {
+    success: true,
+    lineId: lineId,
+    woId: targetWoId,
+    status: status,
+    verification: verification || '',
+    totalItems: progress.totalItems,
+    completedItems: progress.completedItems,
+    workOrderStatus: progress.status
   };
 }
 
@@ -1179,6 +1378,7 @@ function fetchDatabaseState() {
         taskDescription: String(lRow[2] || ''),
         status: String(lRow[3] || 'Pending'),
         photoUrl: String(lRow[4] || ''),
+        verification: String(lRow[5] || ''),
         notes: String(lRow[6] || ''),
         timestamp: String(lRow[7] || '')
       });

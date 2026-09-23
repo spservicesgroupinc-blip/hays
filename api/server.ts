@@ -137,6 +137,11 @@ interface LineItem {
   photoUrl: string;
   notes?: string;
   timestamp: string;
+  /** Human review state for the newest photo: `Pending Review`, `Approved` or a rejection reason. */
+  verification?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
 }
 
 interface JobRecord {
@@ -179,6 +184,7 @@ interface WorkOrder {
   subPhone: string;
   assignedSubId?: string;
   scheduledDate: string;
+  /** `Completed` requires the crew's electronic sign-off; photos alone never complete it. */
   status: 'Open' | 'In Progress' | 'Completed';
   totalItems: number;
   completedItems: number;
@@ -205,14 +211,12 @@ interface UserRecord {
   salt: string;
   passwordHash: string;
   createdAt?: string;
-  tempPassword?: string;
-  password?: string;
 }
 
 interface ActivityEvent {
   id: string;
   timestamp: string;
-  type: 'photo_uploaded' | 'ai_verified' | 'wo_created' | 'wo_completed' | 'sub_created' | 'pm_created' | 'sub_signed_off';
+  type: 'photo_uploaded' | 'photo_resubmitted' | 'line_item_reviewed' | 'wo_reopened' | 'ai_verified' | 'wo_created' | 'wo_completed' | 'job_created' | 'wo_deleted' | 'job_deleted' | 'sub_created' | 'sub_deleted' | 'pm_created' | 'sub_signed_off' | 'wo_signed_off_by_pm' | 'view_as_sub';
   subId?: string;
   subName: string;
   company: string;
@@ -221,6 +225,9 @@ interface ActivityEvent {
   lineId?: string;
   taskDescription?: string;
   verdict?: 'PASS' | 'RETAKE_NEEDED' | '';
+  /** Present on review events: who decided, and what they decided. */
+  reviewStatus?: 'Approved' | 'Rejected' | 'Pending Review' | '';
+  reviewedBy?: string;
   notes?: string;
   photoUrl?: string;
 }
@@ -239,10 +246,39 @@ function hashPassword(password: string, salt: string): string {
 }
 
 function verifyPassword(password: string, salt: string, hash: string): boolean {
+  if (!hash) return false;
+  // Credentials mirrored from the roster sheets are stored as portable
+  // "sha256:<hex>" digests by the Apps Script layer instead of the local
+  // salted pbkdf2 format.
+  if (hash.startsWith('sha256:')) {
+    return `sha256:${crypto.createHash('sha256').update(password).digest('hex')}` === hash;
+  }
   return hashPassword(password, salt) === hash;
 }
 
+// Sheets-backed credentials use a portable digest so a subcontractor can still
+// sign in after a serverless cold start rebuilds the in-memory user database.
+const SHEETS_PASSWORD_PREFIX = 'sha256:';
+const SHEETS_PASSWORD_SALT = 'sheets-digest';
+
+function isSheetsDigest(value: string): boolean {
+  return String(value || '').startsWith(SHEETS_PASSWORD_PREFIX);
+}
+
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Minimum password length enforced on every path that lets a human choose a
+// password (PM onboarding, PM-created crew invite, self-registration).
+const MIN_PASSWORD_LENGTH = 8;
+
+// A "view as subcontractor" preview is deliberately short lived: it exists to
+// check what the crew sees, not to become a second way to work the job.
+const PREVIEW_SESSION_MS = 60 * 60 * 1000;
+
+// The activity log is a rolling evidence trail, not an archive: cap what is kept
+// on disk and what is served so the JSON payload cannot grow without bound.
+const MAX_ACTIVITY_WINDOW = 250;
+const DEFAULT_ACTIVITY_WINDOW = 50;
 
 // Resolve a stable signing secret for authentication tokens. The previous
 // behavior generated a new random secret on every process start, which made
@@ -295,9 +331,16 @@ interface TokenPayload {
   name?: string;
   company?: string;
   exp: number;
+  // Set only on "view as subcontractor" preview tokens: the id of the Project
+  // Manager who opened the preview. Preview sessions are read-only so a PM
+  // cannot leave field work recorded under a crew member's name.
+  previewOf?: string;
 }
 
-function generateSecureToken(user?: { id: string; email: string; role: 'pm' | 'subcontractor'; name?: string; company?: string }): string {
+function generateSecureToken(
+  user?: { id: string; email: string; role: 'pm' | 'subcontractor'; name?: string; company?: string },
+  options: { ttlMs?: number; previewOf?: string } = {}
+): string {
   if (!user) {
     return crypto.randomBytes(32).toString('hex');
   }
@@ -307,7 +350,8 @@ function generateSecureToken(user?: { id: string; email: string; role: 'pm' | 's
     role: user.role,
     name: user.name,
     company: user.company,
-    exp: Date.now() + SEVEN_DAYS_MS
+    exp: Date.now() + (options.ttlMs || SEVEN_DAYS_MS),
+    previewOf: options.previewOf
   };
   const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const sig = crypto.createHmac('sha256', AUTH_SECRET).update(data).digest('base64url');
@@ -348,7 +392,42 @@ const sessionsDb: Record<string, SessionRecord> = {};
 // ----------------------------------------------------------------------------
 const activityLogsDb: ActivityEvent[] = [];
 
-function getSafeUser(user: UserRecord, token?: string) {
+// Public Project Manager sign-up stays closed unless the deployer sets
+// PM_INVITE_CODE. While no Project Manager exists at all the first account may
+// still bootstrap, so a fresh deployment can be configured.
+function isPmSelfRegistrationAllowed(inviteCode: unknown): { allowed: boolean; error?: string } {
+  const configured = (process.env.PM_INVITE_CODE || '').trim();
+  const supplied = String(inviteCode || '').trim();
+  if (configured) {
+    return supplied === configured
+      ? { allowed: true }
+      : { allowed: false, error: 'A valid Project Manager invite code is required to create an administrator account.' };
+  }
+  const pmCount = Object.values(usersDb).filter(u => u.role === 'pm').length;
+  if (pmCount === 0) return { allowed: true };
+  return {
+    allowed: false,
+    error: 'Project Manager self-registration is disabled. Ask an existing administrator to create your account.'
+  };
+}
+
+/** Appends an activity event and keeps the rolling evidence window bounded. */
+function recordActivity(event: ActivityEvent): void {
+  activityLogsDb.unshift(event);
+  if (activityLogsDb.length > MAX_ACTIVITY_WINDOW) {
+    activityLogsDb.length = MAX_ACTIVITY_WINDOW;
+  }
+}
+
+/** Renders a stored timestamp for humans in error messages. Records are stored as
+ *  ISO-8601, but legacy rows may hold locale strings, which pass through as-is. */
+function formatStamp(value?: string): string {
+  if (!value) return 'unknown time';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
+}
+
+function getSafeUser(user: UserRecord) {
   return {
     id: user.id,
     email: user.email,
@@ -359,9 +438,7 @@ function getSafeUser(user: UserRecord, token?: string) {
     phone: user.phone,
     assignedWoIds: user.assignedWoIds,
     permissions: user.permissions,
-    createdAt: user.createdAt,
-    tempPassword: user.tempPassword,
-    token
+    createdAt: user.createdAt
   };
 }
 
@@ -370,8 +447,6 @@ function getUserFromRequest(req: express.Request): UserRecord | null {
   let token = '';
   if (authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7).trim();
-  } else if (req.query.token && typeof req.query.token === 'string') {
-    token = req.query.token;
   }
 
   // 1. If we have a signed stateless token, verify it (works across all serverless lambda instances)
@@ -386,26 +461,9 @@ function getUserFromRequest(req: express.Request): UserRecord | null {
       user = usersDb[payload.uid] || Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === payload.email.toLowerCase().trim());
       if (user) return user;
 
-      // Reconstruct valid authorized user from verified stateless token
-      const permissions = payload.role === 'pm'
-        ? ['create_work_order', 'view_all_work_orders', 'edit_work_order', 'delete_work_order', 'view_analytics']
-        : ['view_assigned_work_orders', 'upload_inspection_photo', 'sign_off_work_order'];
-
-      const reconstructedUser: UserRecord = {
-        id: payload.uid,
-        email: payload.email,
-        name: payload.name || (payload.role === 'pm' ? 'Project Manager' : 'Subcontractor Partner'),
-        role: payload.role,
-        company: payload.company || (payload.role === 'pm' ? 'Hays + Sons Restoration' : 'Trade Partner'),
-        trade: payload.role === 'pm' ? 'General Restoration & Project Management' : 'Trade Subcontractor',
-        assignedWoIds: [],
-        permissions,
-        salt: 'stateless',
-        passwordHash: 'stateless',
-        createdAt: new Date().toISOString()
-      };
-      usersDb[payload.uid] = reconstructedUser;
-      return reconstructedUser;
+      // The token is genuine but the account no longer exists (deleted or
+      // reset). Do not resurrect it: a revoked account must stay revoked.
+      return null;
     }
 
     // Direct active session cache check
@@ -426,6 +484,33 @@ function getUserFromRequest(req: express.Request): UserRecord | null {
   return null;
 }
 
+// ----------------------------------------------------------------------------
+// WRITE GUARD FOR "VIEW AS SUBCONTRACTOR" PREVIEW SESSIONS
+// ----------------------------------------------------------------------------
+// A preview token authenticates *as* the subcontractor so the PM can see exactly
+// what the crew sees. Everything that records field work (photo upload, PM
+// review, sign-off) must therefore refuse to run on a preview token, otherwise a
+// PM action would be permanently attributed to the crew member.
+function getPreviewPmId(req: express.Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+  const payload = verifyAndDecodeToken(authHeader.substring(7).trim());
+  return payload?.previewOf || null;
+}
+
+function rejectPreviewWrite(req: express.Request, res: express.Response, action: string): boolean {
+  const previewPmId = getPreviewPmId(req);
+  if (!previewPmId) return false;
+  const pm = usersDb[previewPmId];
+  res.status(403).json({
+    success: false,
+    error: `Preview mode is read-only: ${action} is disabled while viewing the portal as a subcontractor.`,
+    previewMode: true,
+    previewedBy: pm ? pm.name : undefined
+  });
+  return true;
+}
+
 function canUserAccessWorkOrder(user: UserRecord, woId: string, wo?: WorkOrder): boolean {
   if (user.role === 'pm') return true;
   if (!wo) return false;
@@ -434,8 +519,10 @@ function canUserAccessWorkOrder(user: UserRecord, woId: string, wo?: WorkOrder):
   if (user.assignedWoIds.map(id => id.toUpperCase()).includes(upperWoId)) {
     return true;
   }
-  if (wo.assignedSubId && wo.assignedSubId === user.id) {
-    return true;
+  if (wo.assignedSubId) {
+    // An explicitly assigned work order belongs to exactly one crew; loose
+    // company/phone matching must not widen that.
+    return wo.assignedSubId === user.id;
   }
   if (user.phone && wo.subPhone && user.phone.replace(/\D/g, '') === wo.subPhone.replace(/\D/g, '')) {
     return true;
@@ -495,12 +582,55 @@ function saveDatabaseState() {
       workOrders: workOrdersDb,
       lineItems: lineItemsDb,
       jobs: jobsDb,
-      activityLogs: activityLogsDb.slice(0, 250)
+      activityLogs: activityLogsDb.slice(0, MAX_ACTIVITY_WINDOW)
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(payload, null, 2), 'utf-8');
   } catch (err: any) {
     console.warn('Persistence save notice:', err.message);
   }
+}
+
+// Keeps derived work-order counters, the "Completed requires sign-off"
+// invariant, and job -> work order links truthful after state is rebuilt from
+// disk or from Google Sheets (Sheets stores them but cannot enforce them).
+function normalizeWorkOrderState() {
+  Object.values(workOrdersDb).forEach(wo => {
+    const items = lineItemsDb[wo.woId] || [];
+    if (items.length > 0) {
+      wo.totalItems = items.length;
+      wo.completedItems = items.filter(i => i.status === 'Completed').length;
+    }
+    // The sheet's Status column is free text and the legacy UI could write values
+    // the app never produces ('Flagged'). Coerce anything unrecognised instead of
+    // leaking it into the typed API payload.
+    if (wo.status !== 'Open' && wo.status !== 'In Progress' && wo.status !== 'Completed') {
+      wo.status = wo.completedItems > 0 ? 'In Progress' : 'Open';
+    }
+    if (String(wo.signedAt || '').trim()) {
+      wo.status = 'Completed';
+    } else if (wo.status === 'Completed') {
+      wo.status = wo.completedItems > 0 ? 'In Progress' : 'Open';
+    }
+  });
+
+  // Job -> work order links are derived from the work orders themselves; the
+  // persisted id array drifts because Sheets has no column for it.
+  Object.values(jobsDb).forEach(job => {
+    const ids = new Set<string>();
+    Object.values(workOrdersDb).forEach(wo => {
+      if (wo.jobId && wo.jobId === job.id) ids.add(wo.woId);
+    });
+    job.workOrderIds = Array.from(ids);
+  });
+
+  // Crew assignments live on the work order (Assigned Sub ID column); mirror
+  // them onto the user so assignment checks and the crew portal agree.
+  Object.values(usersDb).forEach(user => {
+    if (user.role !== 'subcontractor') return;
+    user.assignedWoIds = Object.values(workOrdersDb)
+      .filter(wo => wo.assignedSubId === user.id)
+      .map(wo => wo.woId);
+  });
 }
 
 function loadDatabaseState() {
@@ -515,6 +645,12 @@ function loadDatabaseState() {
       const data = JSON.parse(raw);
       if (data.users && typeof data.users === 'object') {
         Object.assign(usersDb, data.users);
+        // States written by older builds kept the password in clear text; drop
+        // it so reactivating an old file cannot reintroduce a plaintext login.
+        Object.values(usersDb).forEach(u => {
+          delete (u as any).tempPassword;
+          delete (u as any).password;
+        });
       }
       if (data.workOrders && typeof data.workOrders === 'object') {
         Object.assign(workOrdersDb, data.workOrders);
@@ -533,6 +669,7 @@ function loadDatabaseState() {
         customAppsScriptUrl = data.customAppsScriptUrl;
       }
       console.log(`Loaded persisted state: ${Object.keys(usersDb).length} users, ${Object.keys(workOrdersDb).length} work orders.`);
+      normalizeWorkOrderState();
     }
   } catch (err: any) {
     console.warn('Persistence load notice:', err.message);
@@ -551,7 +688,7 @@ async function callAppsScript(action: string, payload: Record<string, any>, time
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action, ...payload }),
+      body: JSON.stringify({ action, syncKey: process.env.APPS_SCRIPT_SYNC_KEY || '', ...payload }),
       redirect: 'follow',
       signal: controller.signal
     });
@@ -574,11 +711,17 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
   try {
     const data = await callAppsScript('fetchDatabaseState', {});
     if (data && data.success) {
-      // 1. Sync durable jobs before attaching their work orders.
+      // 1. Sync durable jobs before attaching their work orders. Fields the
+      // sheet has no column for are carried over from the existing record so a
+      // sync never silently discards the extraction package.
       if (Array.isArray(data.jobs)) {
         for (const job of data.jobs) {
           const id = String(job.id || '').trim();
           if (!id) continue;
+          const previous = jobsDb[id];
+          const fieldPackage = Array.isArray(job.fieldPackage) && job.fieldPackage.length
+            ? job.fieldPackage
+            : previous?.fieldPackage;
           jobsDb[id] = {
             id,
             customerName: String(job.customerName || ''),
@@ -587,22 +730,34 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
             email: String(job.email || ''),
             claimNumber: String(job.claimNumber || ''),
             lossType: String(job.lossType || 'Restoration'),
+            documentKind: job.documentKind || previous?.documentKind,
+            documentKindLabel: job.documentKindLabel || previous?.documentKindLabel,
             totalEstimate: String(job.totalEstimate || ''),
             notes: String(job.notes || ''),
             scopeSummary: String(job.scopeSummary || ''),
             extractedTasks: Array.isArray(job.extractedTasks) ? job.extractedTasks : [],
             extractedTrades: Array.isArray(job.extractedTrades) ? job.extractedTrades : [],
+            fieldPackage,
+            sourceHash: job.sourceHash || previous?.sourceHash,
+            extractionMethod: job.extractionMethod || previous?.extractionMethod,
+            extractionConfidence: job.extractionConfidence ?? previous?.extractionConfidence,
+            extractionWarnings: Array.isArray(job.extractionWarnings) ? job.extractionWarnings : previous?.extractionWarnings,
+            documentStats: job.documentStats || previous?.documentStats,
             createdAt: String(job.createdAt || new Date().toISOString()),
-            workOrderIds: []
+            workOrderIds: previous?.workOrderIds || []
           };
         }
       }
 
-      // 2. Sync Work Orders
+      // 2. Sync Work Orders (PM-only scope fields are carried over, see above)
       if (Array.isArray(data.workOrders)) {
         for (const wo of data.workOrders) {
           const upperWoId = String(wo.woId).trim().toUpperCase();
           if (!upperWoId) continue;
+          const previous = workOrdersDb[upperWoId];
+          const fieldPackage = Array.isArray(wo.fieldPackage) && wo.fieldPackage.length
+            ? wo.fieldPackage
+            : previous?.fieldPackage;
           
           workOrdersDb[upperWoId] = {
             woId: upperWoId,
@@ -621,8 +776,10 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
             completedItems: Number(wo.completedItems || 0),
             signedBy: wo.signedBy || undefined,
             signedAt: wo.signedAt || undefined,
-            createdBy: wo.createdBy || 'Project Manager',
-            scopeHash: wo.scopeHash || undefined
+            createdBy: wo.createdBy || previous?.createdBy || 'Project Manager',
+            scopeHash: wo.scopeHash || previous?.scopeHash,
+            sourceJobId: wo.sourceJobId || previous?.sourceJobId,
+            fieldPackage
           };
           if (wo.jobId && jobsDb[wo.jobId] && !jobsDb[wo.jobId].workOrderIds.includes(upperWoId)) {
             jobsDb[wo.jobId].workOrderIds.push(upperWoId);
@@ -630,12 +787,23 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
         }
       }
 
-      // 3. Sync Line Items
+      // 3. Sync Line Items (per-line instructions live only in the app, so keep
+      // whatever the existing record already holds)
       if (data.lineItems && typeof data.lineItems === 'object') {
         for (const [woId, items] of Object.entries(data.lineItems)) {
           const upperWoId = String(woId).trim().toUpperCase();
           if (Array.isArray(items)) {
-            lineItemsDb[upperWoId] = items as LineItem[];
+            const previousItems = lineItemsDb[upperWoId] || [];
+            lineItemsDb[upperWoId] = (items as LineItem[]).map(item => {
+              const previous = previousItems.find(p => p.lineId === item.lineId);
+              return {
+                ...item,
+                // A free-text sheet cell may hold anything; only the two states the
+                // line-item workflow understands may reach the API.
+                status: item.status === 'Completed' || item.status === 'Flagged' ? item.status : 'Pending',
+                instruction: item.instruction || previous?.instruction
+              };
+            });
           }
         }
       }
@@ -646,12 +814,11 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
           if (!sub.email) continue;
           const cleanEmail = String(sub.email).trim().toLowerCase();
           const existing = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
-          const subPass = String(sub.password || '').trim();
-          
+          const sheetsCredential = String(sub.password || '').trim();
+          const hasDigest = isSheetsDigest(sheetsCredential);
+
           if (!existing) {
             const subId = sub.id || `usr_sub_${Date.now().toString(36)}`;
-            const salt = `salt_sub_${Date.now()}`;
-            const effectivePass = subPass || crypto.randomBytes(12).toString('base64url');
             usersDb[subId] = {
               id: subId,
               email: cleanEmail,
@@ -662,24 +829,25 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
               phone: sub.phone || '',
               assignedWoIds: [],
               permissions: ['view_assigned_work_orders', 'upload_inspection_photo', 'sign_off_work_order'],
-              salt,
-              passwordHash: hashPassword(effectivePass, salt),
-              tempPassword: effectivePass,
-              password: effectivePass,
+              // Roster rows only ever carry a digest. Without one the account
+              // has no usable password until an administrator issues a reset,
+              // so store an unmatchable hash instead of inventing credentials.
+              salt: hasDigest ? SHEETS_PASSWORD_SALT : `salt_sub_${Date.now()}`,
+              passwordHash: hasDigest ? sheetsCredential : crypto.randomBytes(32).toString('hex'),
               createdAt: new Date().toISOString()
             };
           } else {
-            // Update details without clobbering existing custom password
+            // Update details without clobbering the local password hash
             if (sub.company) existing.company = sub.company;
             if (sub.name) existing.name = sub.name;
             if (sub.trade) existing.trade = sub.trade;
             if (sub.phone) existing.phone = sub.phone;
-            if (subPass) {
-              existing.salt = `salt_sub_${Date.now()}`;
-              existing.passwordHash = hashPassword(subPass, existing.salt);
-              existing.tempPassword = subPass;
-              existing.password = subPass;
+            if (hasDigest) {
+              existing.salt = SHEETS_PASSWORD_SALT;
+              existing.passwordHash = sheetsCredential;
             }
+            delete (existing as any).tempPassword;
+            delete (existing as any).password;
           }
         }
       }
@@ -690,12 +858,11 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
           if (!pm.email) continue;
           const cleanEmail = String(pm.email).trim().toLowerCase();
           const existing = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
-          const pmPass = String(pm.password || '').trim();
-          
+          const sheetsCredential = String(pm.password || '').trim();
+          const hasDigest = isSheetsDigest(sheetsCredential);
+
           if (!existing) {
             const pmId = pm.id || `usr_pm_${Date.now().toString(36)}`;
-            const salt = `salt_pm_${Date.now()}`;
-            const effectivePass = pmPass || crypto.randomBytes(12).toString('base64url');
             usersDb[pmId] = {
               id: pmId,
               email: cleanEmail,
@@ -712,27 +879,26 @@ async function syncFromGoogleSheets(): Promise<{ workOrdersCount: number; subcon
                 'delete_work_order',
                 'view_analytics'
               ],
-              salt,
-              passwordHash: hashPassword(effectivePass, salt),
-              tempPassword: effectivePass,
-              password: effectivePass,
+              salt: hasDigest ? SHEETS_PASSWORD_SALT : `salt_pm_${Date.now()}`,
+              passwordHash: hasDigest ? sheetsCredential : crypto.randomBytes(32).toString('hex'),
               createdAt: new Date().toISOString()
             };
           } else {
-            // Update details without clobbering existing custom password
+            // Update details without clobbering the local password hash
             if (pm.name) existing.name = pm.name;
             if (pm.company) existing.company = pm.company;
             if (pm.phone) existing.phone = pm.phone;
-            if (pmPass) {
-              existing.salt = `salt_pm_${Date.now()}`;
-              existing.passwordHash = hashPassword(pmPass, existing.salt);
-              existing.tempPassword = pmPass;
-              existing.password = pmPass;
+            if (hasDigest) {
+              existing.salt = SHEETS_PASSWORD_SALT;
+              existing.passwordHash = sheetsCredential;
             }
+            delete (existing as any).tempPassword;
+            delete (existing as any).password;
           }
         }
       }
 
+      normalizeWorkOrderState();
       saveDatabaseState();
       console.log(`Synced ${Object.keys(workOrdersDb).length} work orders, ${Object.values(usersDb).filter(u => u.role === 'subcontractor').length} subcontractors from Google Sheets.`);
     }
@@ -800,11 +966,16 @@ app.get('/api/health', (req, res) => {
 app.get('/api/auth/status', (req, res) => {
   const pms = Object.values(usersDb).filter(u => u.role === 'pm');
   const subs = Object.values(usersDb).filter(u => u.role === 'subcontractor');
+  const pmInviteConfigured = !!(process.env.PM_INVITE_CODE || '').trim();
   res.json({
     success: true,
     hasProjectManager: pms.length > 0,
     pmCount: pms.length,
-    subcontractorCount: subs.length
+    subcontractorCount: subs.length,
+    // The sign-in page only shows the invite-code field when a code is needed,
+    // and hides the PM option entirely when self-registration is switched off.
+    pmSignupRequiresCode: pmInviteConfigured,
+    pmSignupClosed: !pmInviteConfigured && pms.length > 0
   });
 });
 
@@ -824,9 +995,17 @@ app.post('/api/auth/register-pm', async (req, res) => {
     if (typeof body === 'string') {
       try { body = JSON.parse(body); } catch { /* ignore */ }
     }
-    const { name, email, company, phone, password } = body;
+    const { name, email, company, phone, password, inviteCode } = body;
     if (!name || !email || !password) {
       return res.status(400).json({ success: false, error: 'Full Name, Email Address, and Password are required.' });
+    }
+    if (String(password).trim().length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ success: false, error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters long.` });
+    }
+
+    const gate = isPmSelfRegistrationAllowed(inviteCode);
+    if (!gate.allowed) {
+      return res.status(403).json({ success: false, error: gate.error });
     }
 
     const cleanEmail = String(email || '').trim().toLowerCase();
@@ -857,8 +1036,6 @@ app.post('/api/auth/register-pm', async (req, res) => {
       ],
       salt: pmSalt,
       passwordHash,
-      tempPassword: password,
-      password,
       createdAt: new Date().toISOString()
     };
 
@@ -873,10 +1050,9 @@ app.post('/api/auth/register-pm', async (req, res) => {
     };
 
     // Log Activity
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    activityLogsDb.unshift({
+    recordActivity({
       id: `act_${Date.now()}`,
-      timestamp: nowTime,
+      timestamp: new Date().toISOString(),
       type: 'pm_created',
       subId: pmId,
       subName: newPm.name,
@@ -898,7 +1074,7 @@ app.post('/api/auth/register-pm', async (req, res) => {
       success: true,
       message: 'Project Manager account created successfully.',
       token,
-      user: getSafeUser(newPm, token)
+      user: getSafeUser(newPm)
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -929,13 +1105,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     let isPasswordValid = false;
     if (user) {
-      if (verifyPassword(trimmedPass, user.salt, user.passwordHash)) {
-        isPasswordValid = true;
-      } else if (user.tempPassword && user.tempPassword === trimmedPass) {
-        isPasswordValid = true;
-      } else if (user.password && user.password === trimmedPass) {
-        isPasswordValid = true;
-      }
+      isPasswordValid = verifyPassword(trimmedPass, user.salt, user.passwordHash);
     }
 
     // If credentials not valid or user not found locally, query Apps Script (Google Sheets)
@@ -962,8 +1132,6 @@ app.post('/api/auth/login', async (req, res) => {
               : ['view_assigned_work_orders', 'upload_inspection_photo', 'sign_off_work_order'],
             salt,
             passwordHash: hashPassword(trimmedPass, salt),
-            tempPassword: trimmedPass,
-            password: trimmedPass,
             createdAt: new Date().toISOString()
           };
           usersDb[userId] = user;
@@ -992,7 +1160,7 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({
       success: true,
       token,
-      user: getSafeUser(user, token)
+      user: getSafeUser(user)
     });
   } catch (err: any) {
     console.error('Login route error:', err);
@@ -1012,7 +1180,7 @@ app.post('/api/auth/register', async (req, res) => {
       }
     }
 
-    const { email, password, name, role, company, phone, trade } = body;
+    const { email, password, name, role, company, phone, trade, inviteCode } = body;
     const cleanEmail = String(email || '').toLowerCase().trim();
     const strPass = String(password || '').trim();
     const strName = String(name || '').trim();
@@ -1026,8 +1194,15 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Role must be either "pm" or "subcontractor".' });
     }
 
-    if (strPass.length < 6) {
-      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters long.' });
+    if (targetRole === 'pm') {
+      const gate = isPmSelfRegistrationAllowed(inviteCode);
+      if (!gate.allowed) {
+        return res.status(403).json({ success: false, error: gate.error });
+      }
+    }
+
+    if (strPass.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ success: false, error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters long.` });
     }
 
     const existing = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
@@ -1061,25 +1236,16 @@ app.post('/api/auth/register', async (req, res) => {
       permissions,
       salt,
       passwordHash,
-      tempPassword: strPass,
-      password: strPass,
       createdAt: new Date().toISOString()
     };
 
     usersDb[id] = newUser;
     saveDatabaseState();
 
-    let nowTime = '';
-    try {
-      nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    } catch {
-      nowTime = new Date().toISOString().substring(11, 16);
-    }
-
     if (targetRole === 'subcontractor') {
-      activityLogsDb.unshift({
+      recordActivity({
         id: `act_${Date.now()}`,
-        timestamp: nowTime,
+        timestamp: new Date().toISOString(),
         type: 'sub_created',
         subId: id,
         subName: newUser.name,
@@ -1102,9 +1268,9 @@ app.post('/api/auth/register', async (req, res) => {
         console.warn('Cloud sheet registration sync notice:', e?.message);
       }
     } else if (targetRole === 'pm') {
-      activityLogsDb.unshift({
+      recordActivity({
         id: `act_${Date.now()}`,
-        timestamp: nowTime,
+        timestamp: new Date().toISOString(),
         type: 'pm_created',
         subId: id,
         subName: newUser.name,
@@ -1137,7 +1303,7 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(201).json({
       success: true,
       token,
-      user: getSafeUser(newUser, token)
+      user: getSafeUser(newUser)
     });
   } catch (err: any) {
     console.error('Registration error:', err);
@@ -1156,7 +1322,7 @@ app.get('/api/auth/me', (req, res) => {
   }
   const authHeader = req.headers.authorization;
   const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7).trim() : undefined;
-  res.json({ success: true, user: getSafeUser(user, token) });
+  res.json({ success: true, user: getSafeUser(user) });
 });
 
 // 5. Authentication: Logout
@@ -1169,6 +1335,59 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ success: true });
 });
 
+// Subcontractors only need the fields that drive their checklist; pricing,
+// estimation provenance, and internal audit fields stay on the PM side.
+function toSubcontractorJobView(job: JobRecord) {
+  return {
+    id: job.id,
+    customerName: job.customerName,
+    propertyAddress: job.propertyAddress,
+    phone: job.phone,
+    email: job.email,
+    claimNumber: job.claimNumber,
+    lossType: job.lossType,
+    notes: job.notes,
+    scopeSummary: job.scopeSummary,
+    extractedTrades: job.extractedTrades,
+    extractedTasks: job.extractedTasks,
+    fieldPackage: job.fieldPackage,
+    createdAt: job.createdAt,
+    workOrderIds: job.workOrderIds
+  };
+}
+
+function toSubcontractorWorkOrderView(wo: WorkOrder) {
+  return {
+    woId: wo.woId,
+    jobId: wo.jobId,
+    projectName: wo.projectName,
+    customerName: wo.customerName,
+    propertyAddress: wo.propertyAddress,
+    trade: wo.trade,
+    unitArea: wo.unitArea,
+    subName: wo.subName,
+    subPhone: wo.subPhone,
+    scheduledDate: wo.scheduledDate,
+    status: wo.status,
+    totalItems: wo.totalItems,
+    completedItems: wo.completedItems,
+    signedBy: wo.signedBy,
+    signedAt: wo.signedAt,
+    fieldPackage: wo.fieldPackage
+  };
+}
+
+// Work orders are linked to their job in both directions; the job's own id list
+// can drift (it is not a sheet column), so resolve through the work order index
+// as well instead of trusting it alone.
+function getWorkOrdersForJob(job: JobRecord): WorkOrder[] {
+  const ids = new Set(job.workOrderIds.map(id => String(id || '').trim().toUpperCase()));
+  Object.values(workOrdersDb).forEach(wo => {
+    if (wo.jobId && wo.jobId === job.id) ids.add(wo.woId);
+  });
+  return Array.from(ids).map(id => workOrdersDb[id]).filter(Boolean);
+}
+
 // 5b. Jobs: Get all jobs (with associated work orders)
 app.get('/api/jobs', (req, res) => {
   const user = getUserFromRequest(req);
@@ -1176,21 +1395,23 @@ app.get('/api/jobs', (req, res) => {
     return res.status(401).json({ success: false, error: 'Authentication required' });
   }
 
+  const isPm = user.role === 'pm';
   const jobsList = Object.values(jobsDb).map(job => {
-    let wos = job.workOrderIds.map(id => workOrdersDb[id]).filter(Boolean);
+    let wos = getWorkOrdersForJob(job);
     // If subcontractor, only show work orders assigned to them
-    if (user.role === 'subcontractor') {
+    if (!isPm) {
       wos = wos.filter(wo => canUserAccessWorkOrder(user, wo.woId, wo));
     }
     return {
-      ...job,
-      workOrders: wos
+      ...(isPm ? job : toSubcontractorJobView(job)),
+      workOrderIds: wos.map(wo => wo.woId),
+      workOrders: isPm ? wos : wos.map(toSubcontractorWorkOrderView)
     };
   });
 
   // Filter out jobs with 0 work orders for subcontractors if they have no assignments
-  const visibleJobs = user.role === 'pm' 
-    ? jobsList 
+  const visibleJobs = isPm
+    ? jobsList
     : jobsList.filter(j => (j.workOrders && j.workOrders.length > 0));
 
   res.json({ success: true, jobs: visibleJobs });
@@ -1209,16 +1430,18 @@ app.get('/api/jobs/:id', (req, res) => {
     return res.status(404).json({ success: false, error: 'Job not found' });
   }
 
-  let wos = job.workOrderIds.map(woId => workOrdersDb[woId]).filter(Boolean);
-  if (user.role === 'subcontractor') {
+  const isPm = user.role === 'pm';
+  let wos = getWorkOrdersForJob(job);
+  if (!isPm) {
     wos = wos.filter(wo => canUserAccessWorkOrder(user, wo.woId, wo));
   }
 
   res.json({
     success: true,
     job: {
-      ...job,
-      workOrders: wos
+      ...(isPm ? job : toSubcontractorJobView(job)),
+      workOrderIds: wos.map(wo => wo.woId),
+      workOrders: isPm ? wos : wos.map(toSubcontractorWorkOrderView)
     }
   });
 });
@@ -1262,10 +1485,11 @@ app.post('/api/jobs', async (req, res) => {
     console.warn('Apps Script createJob sync notice:', gasErr.message);
   }
 
-  activityLogsDb.unshift({
+  recordActivity({
     id: `act_${Date.now()}`,
-    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    type: 'wo_created',
+    timestamp: new Date().toISOString(),
+    type: 'job_created',
+    subId: user.id,
     subName: user.name,
     company: user.company,
     projectName: `${newJob.customerName} - ${newJob.lossType}`,
@@ -1276,7 +1500,7 @@ app.post('/api/jobs', async (req, res) => {
 });
 
 // 5e. Jobs: Delete Job (PM only)
-app.delete('/api/jobs/:id', (req, res) => {
+app.delete('/api/jobs/:id', async (req, res) => {
   const user = getUserFromRequest(req);
   if (!user || user.role !== 'pm') {
     return res.status(403).json({ success: false, error: 'Only Project Managers can delete jobs' });
@@ -1288,10 +1512,13 @@ app.delete('/api/jobs/:id', (req, res) => {
     return res.status(404).json({ success: false, error: 'Job not found' });
   }
 
-  const deletedWoIds = [...job.workOrderIds];
+  // Resolve the work orders through the work-order index as well as the job's own
+  // id list: the list is not a sheet column and can drift, which used to leave
+  // orphaned work orders behind with a dangling jobId and no UI surface.
+  const deletedWoIds = getWorkOrdersForJob(job).map(wo => wo.woId);
 
   // Delete all related work orders and line items
-  job.workOrderIds.forEach(woId => {
+  deletedWoIds.forEach(woId => {
     delete workOrdersDb[woId];
     delete lineItemsDb[woId];
     // Remove from assigned sub lists
@@ -1303,20 +1530,25 @@ app.delete('/api/jobs/:id', (req, res) => {
   delete jobsDb[id];
   saveDatabaseState();
 
-  // Synchronize deletion with Google Sheets
-  callAppsScript('deleteJob', { jobId: id, woIds: deletedWoIds }).catch(err => {
+  // Synchronize deletion with Google Sheets before responding: a best-effort
+  // background call can be dropped when a serverless instance is recycled, which
+  // would resurrect the job on the next cold-start hydration.
+  try {
+    await callAppsScript('deleteJob', { jobId: id, woIds: deletedWoIds });
+  } catch (err: any) {
     console.error('GAS deleteJob sync notice:', err.message);
-  });
+  }
 
   // Log activity
-  activityLogsDb.unshift({
+  recordActivity({
     id: `act_${Date.now()}`,
-    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    type: 'wo_created',
+    timestamp: new Date().toISOString(),
+    type: 'job_deleted',
+    subId: user.id,
     subName: user.name,
     company: user.company,
     projectName: `${job.customerName} - ${job.lossType}`,
-    notes: `Job #${id} (${job.customerName}) and ${deletedWoIds.length} work orders deleted.`
+    notes: `Job #${id} (${job.customerName}) and ${deletedWoIds.length} work orders deleted by ${user.name}.`
   });
 
   res.json({ success: true, message: `Job ${id} deleted.` });
@@ -1324,6 +1556,14 @@ app.delete('/api/jobs/:id', (req, res) => {
 
 // 6. Subcontractors directory (for PM assignments & monitoring)
 app.get('/api/subcontractors', (req, res) => {
+  const user = getUserFromRequest(req);
+  if (!user) {
+    return res.status(401).json({ success: false, error: 'Authentication required. Please sign in.' });
+  }
+  if (user.role !== 'pm') {
+    return res.status(403).json({ success: false, error: 'Access Denied: Only Project Managers can view the subcontractor directory.' });
+  }
+
   const subs = Object.values(usersDb)
     .filter(u => u.role === 'subcontractor')
     .map(u => ({
@@ -1383,8 +1623,7 @@ app.get('/api/pm/subcontractors', (req, res) => {
         completedJobs,
         totalItems,
         completedItems,
-        lastActive: lastAct ? lastAct.timestamp : 'Recently registered',
-        tempPassword: u.tempPassword || ''
+        lastActive: lastAct ? lastAct.timestamp : 'Recently registered'
       };
     });
 
@@ -1392,7 +1631,7 @@ app.get('/api/pm/subcontractors', (req, res) => {
 });
 
 // 6c. PM Creates a New Subcontractor Profile & Direct Invite
-app.post('/api/pm/subcontractors', (req, res) => {
+app.post('/api/pm/subcontractors', async (req, res) => {
   try {
     const user = getUserFromRequest(req);
     if (!user) {
@@ -1407,6 +1646,14 @@ app.post('/api/pm/subcontractors', (req, res) => {
       return res.status(400).json({ success: false, error: 'Name, Company, and Email are required.' });
     }
 
+    const suppliedPassword = String(password || '').trim();
+    if (suppliedPassword && suppliedPassword.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        error: `A password you set yourself must be at least ${MIN_PASSWORD_LENGTH} characters. Leave blank to let the app generate one.`
+      });
+    }
+
     // Check if email already exists
     const cleanEmail = String(email || '').trim().toLowerCase();
     const existing = Object.values(usersDb).find(u => String(u?.email || '').toLowerCase().trim() === cleanEmail);
@@ -1416,7 +1663,7 @@ app.post('/api/pm/subcontractors', (req, res) => {
 
     const subId = `usr_sub_${Date.now().toString(36)}`;
     const subSalt = `salt_sub_${Date.now()}`;
-    const initialPassword = String(password || '').trim() || crypto.randomBytes(12).toString('base64url');
+    const initialPassword = suppliedPassword || crypto.randomBytes(12).toString('base64url');
     const passwordHash = hashPassword(initialPassword, subSalt);
 
     const newSub: UserRecord = {
@@ -1435,27 +1682,20 @@ app.post('/api/pm/subcontractors', (req, res) => {
       ],
       salt: subSalt,
       passwordHash,
-      tempPassword: initialPassword,
-      password: initialPassword,
       createdAt: new Date().toISOString()
     };
 
     usersDb[subId] = newSub;
     saveDatabaseState();
 
-    // Create session token for quick login
-    const token = generateSecureToken(newSub);
-    sessionsDb[token] = {
-      token,
-      userId: subId,
-      expiresAt: Date.now() + SEVEN_DAYS_MS
-    };
+    // No session is minted for the new crew here: the PM holds the one-time
+    // password, not the crew's token. Impersonating the crew is only possible
+    // through the audited POST /api/pm/view-as-sub preview.
 
     // Record activity
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    activityLogsDb.unshift({
+    recordActivity({
       id: `act_${Date.now()}`,
-      timestamp: nowTime,
+      timestamp: new Date().toISOString(),
       type: 'sub_created',
       subId: newSub.id,
       subName: newSub.name,
@@ -1464,15 +1704,20 @@ app.post('/api/pm/subcontractors', (req, res) => {
       notes: `PM ${user.name} created account. Login credentials sent to ${newSub.email}`
     });
 
-    // Synchronize to Google Sheets Subcontractors tab with password
-    callAppsScript('registerSubcontractor', {
-      company: newSub.company,
-      name: newSub.name,
-      trade: newSub.trade,
-      email: newSub.email,
-      phone: newSub.phone,
-      password: initialPassword
-    }).catch(e => console.error('Cloud sheet PM sub creation sync notice:', e.message));
+    // Synchronize to Google Sheets Subcontractors tab so the digest exists before the
+    // crew tries to sign in on a cold-started (hydrated) serverless instance.
+    try {
+      await callAppsScript('registerSubcontractor', {
+        company: newSub.company,
+        name: newSub.name,
+        trade: newSub.trade,
+        email: newSub.email,
+        phone: newSub.phone,
+        password: initialPassword
+      });
+    } catch (gasErr: any) {
+      console.warn('Apps Script PM sub creation sync notice:', gasErr.message);
+    }
 
     res.json({
       success: true,
@@ -1489,8 +1734,7 @@ app.post('/api/pm/subcontractors', (req, res) => {
         completedJobs: 0,
         totalItems: 0,
         completedItems: 0,
-        tempPassword: initialPassword,
-        token
+        tempPassword: initialPassword
       }
     });
   } catch (err: any) {
@@ -1498,8 +1742,54 @@ app.post('/api/pm/subcontractors', (req, res) => {
   }
 });
 
+// 6d. Preview the field portal as a subcontractor (PM only, audited)
+app.post('/api/pm/view-as-sub', (req, res) => {
+  const user = getUserFromRequest(req);
+  if (!user) {
+    return res.status(401).json({ success: false, error: 'Authentication required.' });
+  }
+  if (user.role !== 'pm') {
+    return res.status(403).json({ success: false, error: 'Access Denied: Only Project Managers can open a subcontractor portal preview.' });
+  }
+
+  const subId = String(req.body?.subId || '').trim();
+  const woId = String(req.body?.woId || '').trim();
+  const sub = usersDb[subId];
+  if (!sub || sub.role !== 'subcontractor') {
+    return res.status(404).json({ success: false, error: 'Subcontractor not found.' });
+  }
+  if (woId && !canUserAccessWorkOrder(sub, woId, workOrdersDb[woId])) {
+    return res.status(400).json({ success: false, error: `Work order ${woId} is not assigned to ${sub.company}.` });
+  }
+
+  const token = generateSecureToken(sub, { ttlMs: PREVIEW_SESSION_MS, previewOf: user.id });
+  saveDatabaseState();
+
+  // Who looked at whose portal, and when - a silent account switch leaves no
+  // evidence, so the preview is recorded like any other operator action.
+  recordActivity({
+    id: `act_${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    type: 'view_as_sub',
+    subId: sub.id,
+    subName: sub.name,
+    company: sub.company,
+    woId: woId || undefined,
+    projectName: woId && workOrdersDb[woId] ? workOrdersDb[woId].projectName : undefined,
+    notes: `PM ${user.name} opened the field portal as ${sub.company}${woId ? ` for Work Order #${woId}` : ''}. Preview session expires in ${Math.round(PREVIEW_SESSION_MS / 60000)} minutes.`
+  });
+
+  res.json({
+    success: true,
+    user: getSafeUser(sub),
+    token,
+    expiresAt: new Date(Date.now() + PREVIEW_SESSION_MS).toISOString(),
+    message: `Previewing the field portal as ${sub.company}. This preview is logged in the activity trail and expires automatically.`
+  });
+});
+
 // 6c. Delete Subcontractor (PM only)
-app.delete('/api/pm/subcontractors/:id', (req, res) => {
+app.delete('/api/pm/subcontractors/:id', async (req, res) => {
   const user = getUserFromRequest(req);
   if (!user || user.role !== 'pm') {
     return res.status(403).json({ success: false, error: 'Only Project Managers can delete subcontractors' });
@@ -1525,16 +1815,18 @@ app.delete('/api/pm/subcontractors/:id', (req, res) => {
   });
   saveDatabaseState();
 
-  // Synchronize deletion with Google Sheets
-  callAppsScript('deleteSubcontractor', { subId: id, email: subEmail }).catch(err => {
+  // Synchronize deletion with Google Sheets before responding, otherwise a
+  // dropped background call resurrects the account on the next hydration.
+  try {
+    await callAppsScript('deleteSubcontractor', { subId: id, email: subEmail });
+  } catch (err: any) {
     console.error('GAS deleteSubcontractor sync error:', err.message);
-  });
+  }
 
-  const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  activityLogsDb.unshift({
+  recordActivity({
     id: `act_${Date.now()}`,
-    timestamp: nowTime,
-    type: 'sub_created',
+    timestamp: new Date().toISOString(),
+    type: 'sub_deleted',
     subId: id,
     subName,
     company: subCompany,
@@ -1552,10 +1844,21 @@ app.get('/api/pm/activity-feed', (req, res) => {
     return res.status(401).json({ success: false, error: 'Authentication required.' });
   }
 
-  // Return latest 50 events
+  // The feed carries site photos, crew notes and review verdicts for the whole
+  // company, so it stays with project managers.
+  if (user.role !== 'pm') {
+    return res.status(403).json({ success: false, error: 'Project manager access is required to view the activity feed.' });
+  }
+
+  const requested = Number(req.query.limit);
+  const limit = Number.isFinite(requested) && requested > 0
+    ? Math.min(Math.floor(requested), MAX_ACTIVITY_WINDOW)
+    : DEFAULT_ACTIVITY_WINDOW;
+
   res.json({
     success: true,
-    events: activityLogsDb.slice(0, 50),
+    events: activityLogsDb.slice(0, limit),
+    total: activityLogsDb.length,
     timestamp: Date.now()
   });
 });
@@ -1732,7 +2035,14 @@ function workOrderScopeHash(wo: WorkOrder): string {
   if (wo.scopeHash) return wo.scopeHash;
   const tasks = normalizeTaskList((lineItemsDb[wo.woId] || []).map((item) => item.taskDescription));
   if (tasks.length === 0) return '';
-  return hashScope([wo.jobId || wo.sourceJobId || '', wo.trade || '', wo.unitArea || '', ...tasks]);
+  return hashScope([
+    wo.jobId || wo.sourceJobId || '',
+    wo.trade || '',
+    wo.unitArea || '',
+    wo.assignedSubId || '',
+    wo.scheduledDate || '',
+    ...tasks
+  ]);
 }
 
 /** Collision-free sequential ids - random ids used to silently overwrite records. */
@@ -1844,10 +2154,7 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       mimeType,
       fileName,
       textSnippet,
-      autoCreate,
-      assignedSubId,
-      customSubName,
-      scheduledDate
+      autoCreate
     } = req.body || {};
 
     // Accept both legacy client field names (base64/rawText) and the current
@@ -1881,7 +2188,6 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
     });
 
     const data = toExtractedJobPayload(extraction);
-    const canAutoCreate = Boolean(autoCreate);
 
     // Idempotency: the same document must never produce a second job or a second
     // identical batch of work orders.
@@ -1944,131 +2250,28 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
 
     jobsDb[jobId] = createdJob;
 
-    // Optional one-shot dispatch of every trade group on the job.
-    let createdWorkOrder: WorkOrder | null = null;
-    let createdLineItems: LineItem[] = [];
+    // Dispatch has exactly one entry point now (POST /api/work-orders) so scope
+    // hashing, crew assignment, Sheets sync and the audit trail live in one place.
+    // The old `autoCreate` fork is retired; the flag is reported, never silently
+    // swallowed, so a legacy caller can see that dispatch is still pending.
+    const autoCreateIgnored = Boolean(autoCreate);
+    saveDatabaseState();
 
-    if (canAutoCreate) {
-      const suggestedLower = (extraction.suggestedTrade || '').toLowerCase();
-      let resolvedSubId = assignedSubId;
-      let resolvedSubName = customSubName;
-      let resolvedSubPhone = '';
-
-      const subList = Object.values(usersDb).filter((u) => u.role === 'subcontractor');
-      if (!resolvedSubId || resolvedSubId === 'custom') {
-        const matched = subList.find((s) => {
-          const trade = String(s.trade || '').toLowerCase();
-          if (!trade) return false;
-          if (suggestedLower.includes('plumb') && trade.includes('plumb')) return true;
-          if (suggestedLower.includes('elect') && trade.includes('elect')) return true;
-          if (suggestedLower.includes('floor') && trade.includes('floor')) return true;
-          if (suggestedLower.includes('paint') && trade.includes('paint')) return true;
-          if (suggestedLower.includes('clean') && trade.includes('clean')) return true;
-          if (suggestedLower.includes('carpent') && trade.includes('carpent')) return true;
-          if ((suggestedLower.includes('content') || suggestedLower.includes('demolition')) && (trade.includes('content') || trade.includes('demo'))) return true;
-          return false;
-        });
-
-        if (matched) {
-          resolvedSubId = matched.id;
-          resolvedSubName = matched.company || matched.name;
-          resolvedSubPhone = matched.phone || '';
-        } else if (!resolvedSubName) {
-          delete jobsDb[jobId];
-          saveDatabaseState();
-          return res.status(409).json({
-            success: false,
-            method: extraction.extractionMethod,
-            error: 'No matching subcontractor was found for this scope. Add a subcontractor account for the trade, then dispatch the work order.',
-            data,
-            warnings: extraction.warnings
-          });
-        }
-      } else if (usersDb[resolvedSubId]) {
-        const subUser = usersDb[resolvedSubId];
-        resolvedSubName = subUser.company || subUser.name;
-        resolvedSubPhone = subUser.phone || '';
-      }
-
-      const tasks = normalizeTaskList(extraction.tasks);
-      const woId = allocateWorkOrderId();
-      const scheduled = scheduledDate || new Date().toISOString().split('T')[0];
-      const trade = extraction.suggestedTrade || GENERAL_TRADE;
-      const instructions = taskInstructionMap(extraction.lineItems);
-
-      createdWorkOrder = {
-        woId,
-        jobId,
-        projectName: `${custName} - ${trade || extraction.lossType || 'Restoration'}`,
-        customerName: custName,
-        propertyAddress: extraction.propertyAddress,
-        trade,
-        unitArea: extraction.unitArea || 'Restoration Scope',
-        subName: resolvedSubName || 'Unassigned Subcontractor',
-        subPhone: resolvedSubPhone,
-        assignedSubId: resolvedSubId,
-        scheduledDate: scheduled,
-        status: 'Open',
-        totalItems: tasks.length,
-        completedItems: 0,
-        createdBy: user.name,
-        scopeHash: hashScope([jobId, extraction.suggestedTrade, ...tasks]),
-        sourceJobId: jobId,
-        fieldPackage: fieldPackageForTrade(extraction.fieldPackage, trade)
-      };
-
-      createdLineItems = tasks.map((taskDescription, idx) => ({
-        lineId: `${woId}-L${String(idx + 1).padStart(2, '0')}`,
-        woId,
-        taskDescription,
-        instruction: instructionForTask(instructions, taskDescription, trade),
-        status: 'Pending' as const,
-        photoUrl: '',
-        notes: '',
-        timestamp: ''
-      }));
-
-      workOrdersDb[woId] = createdWorkOrder;
-      lineItemsDb[woId] = createdLineItems;
-      createdJob.workOrderIds.push(woId);
-
-      if (resolvedSubId && usersDb[resolvedSubId] && !usersDb[resolvedSubId].assignedWoIds.includes(woId)) {
-        usersDb[resolvedSubId].assignedWoIds.push(woId);
-      }
-
-      saveDatabaseState();
-
-      // Synchronize with Google Sheets in background (non-blocking).
-      callAppsScript('createWorkOrder', {
-        jobId,
-        woId,
-        project: createdWorkOrder.projectName,
-        trade: createdWorkOrder.trade,
-        assignedSubId: resolvedSubId || '',
-        unit: createdWorkOrder.unitArea,
-        subName: createdWorkOrder.subName,
-        subPhone: resolvedSubPhone,
-        subEmail: resolvedSubId && usersDb[resolvedSubId] ? usersDb[resolvedSubId].email : '',
-        date: scheduled,
-        tasks
-      }).catch((err: any) => {
-        console.warn('Apps Script background sync notice:', err.message);
-      });
-
-      activityLogsDb.unshift({
-        id: `act_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        type: 'wo_created',
-        subId: resolvedSubId,
-        subName: createdWorkOrder.subName,
-        company: createdWorkOrder.subName,
-        woId,
-        projectName: createdWorkOrder.projectName,
-        notes: `Extracted ${tasks.length} scope items from ${fileName || 'estimate'}: Job #${jobId} created and Work Order #${woId} assigned to ${createdWorkOrder.subName}.`
-      });
-    } else {
-      saveDatabaseState();
+    try {
+      await callAppsScript('createJob', { job: createdJob });
+    } catch (gasErr: any) {
+      console.warn('Apps Script createJob sync notice:', gasErr.message);
     }
+
+    recordActivity({
+      id: `act_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      type: 'job_created',
+      subName: '',
+      company: '',
+      projectName: createdJob.scopeSummary || createdJob.propertyAddress || createdJob.customerName,
+      notes: `Estimate processed (${fileName || 'document'}): Job #${jobId} created for ${custName} from ${extraction.tasks.length} scope item(s). Dispatch is pending.`
+    });
 
     res.json({
       success: true,
@@ -2078,9 +2281,13 @@ app.post('/api/ai/extract-job-from-pdf', async (req, res) => {
       warnings: extraction.warnings,
       data,
       job: attachWorkOrders(createdJob),
-      autoCreated: Boolean(createdWorkOrder),
-      workOrder: createdWorkOrder,
-      lineItems: createdLineItems
+      autoCreated: false,
+      autoCreateIgnored,
+      workOrder: null,
+      lineItems: [],
+      message: autoCreateIgnored
+        ? `Job #${jobId} was created, but automatic dispatch is retired. Send the scope to POST /api/work-orders (one call per trade) to hand it to a crew.`
+        : undefined
     });
   } catch (err: any) {
     console.error('Estimate extraction error:', err);
@@ -2103,8 +2310,10 @@ app.get('/api/work-orders', (req, res) => {
     return res.json({ success: true, workOrders: allWos });
   }
 
-  // Subcontractor: only return work orders assigned to them
-  const assignedWos = allWos.filter(wo => canUserAccessWorkOrder(user, wo.woId, wo));
+  // Subcontractor: only their own work orders, without PM-only fields
+  const assignedWos = allWos
+    .filter(wo => canUserAccessWorkOrder(user, wo.woId, wo))
+    .map(toSubcontractorWorkOrderView);
   res.json({ success: true, workOrders: assignedWos });
 });
 
@@ -2131,7 +2340,29 @@ app.get('/api/work-orders/:woId', (req, res) => {
   }
 
   const items = lineItemsDb[wo.woId] || [];
-  res.json({ success: true, workOrder: wo, lineItems: items });
+  if (user.role === 'pm') {
+    return res.json({ success: true, workOrder: wo, lineItems: items });
+  }
+  return res.json({
+    success: true,
+    workOrder: toSubcontractorWorkOrderView(wo),
+    lineItems: items.map(item => ({
+      lineId: item.lineId,
+      woId: item.woId,
+      taskDescription: item.taskDescription,
+      instruction: item.instruction,
+      status: item.status,
+      photoUrl: item.photoUrl,
+      notes: item.notes,
+      timestamp: item.timestamp,
+      // Review feedback belongs to the crew: they must see that a photo was
+      // approved, is waiting on the PM, or was sent back with a note.
+      verification: item.verification,
+      reviewNote: item.reviewNote,
+      reviewedBy: item.reviewedBy,
+      reviewedAt: item.reviewedAt
+    }))
+  });
 });
 
 // 9. Create new Work Order (Strictly PM Only)
@@ -2187,24 +2418,6 @@ app.post('/api/work-orders', async (req, res) => {
       finalTrade
     );
 
-    // Idempotency: dispatching the identical scope twice returns the existing work
-    // order instead of appending a duplicate (this is what used to look like the
-    // app "reloading the same fake work order").
-    const scopeHash = hashScope([jobId || '', finalTrade, finalUnit, ...cleanTasks]);
-    if (!force) {
-      const duplicate = Object.values(workOrdersDb).find((wo) => workOrderScopeHash(wo) === scopeHash);
-      if (duplicate) {
-        return res.json({
-          success: true,
-          duplicate: true,
-          woId: duplicate.woId,
-          workOrder: duplicate,
-          lineItems: lineItemsDb[duplicate.woId] || [],
-          message: `This exact scope is already dispatched as Work Order #${duplicate.woId}.`
-        });
-      }
-    }
-
     let resolvedSubId = assignedSubId;
     // Auto-link to an existing subcontractor account by name or phone.
     if (!resolvedSubId) {
@@ -2215,6 +2428,26 @@ app.post('/api/work-orders', async (req, res) => {
         )
       );
       if (matchedSub) resolvedSubId = matchedSub.id;
+    }
+
+    // Idempotency: dispatching the identical scope to the same crew on the same
+    // day returns the existing work order instead of appending a duplicate (this
+    // is what used to look like the app "reloading the same fake work order").
+    // The assignee and date are part of the identity so the same scope can still
+    // be handed to a second crew or rescheduled without being rejected.
+    const scopeHash = hashScope([jobId || '', finalTrade, finalUnit, resolvedSubId || '', scheduled, ...cleanTasks]);
+    if (!force) {
+      const duplicate = Object.values(workOrdersDb).find((wo) => workOrderScopeHash(wo) === scopeHash);
+      if (duplicate) {
+        return res.json({
+          success: true,
+          duplicate: true,
+          woId: duplicate.woId,
+          workOrder: duplicate,
+          lineItems: lineItemsDb[duplicate.woId] || [],
+          message: `This exact scope is already dispatched as Work Order #${duplicate.woId}. Re-send with "Dispatch anyway" if a second crew or a new date is intended.`
+        });
+      }
     }
 
     const woId = allocateWorkOrderId();
@@ -2283,10 +2516,9 @@ app.post('/api/work-orders', async (req, res) => {
     }
 
     // Record real-time event for PM & Subcontractor streams
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    activityLogsDb.unshift({
+    recordActivity({
       id: `act_${Date.now()}`,
-      timestamp: nowTime,
+      timestamp: new Date().toISOString(),
       type: 'wo_created',
       subId: resolvedSubId,
       subName: newWo.subName,
@@ -2316,7 +2548,7 @@ app.post('/api/work-orders', async (req, res) => {
 });
 
 // 9b. Delete Work Order (Strictly PM Only)
-app.delete('/api/work-orders/:woId', (req, res) => {
+app.delete('/api/work-orders/:woId', async (req, res) => {
   const user = getUserFromRequest(req);
   if (!user || user.role !== 'pm') {
     return res.status(403).json({ success: false, error: 'Only Project Managers can delete work orders' });
@@ -2343,16 +2575,20 @@ app.delete('/api/work-orders/:woId', (req, res) => {
   delete lineItemsDb[upperWoId];
   saveDatabaseState();
 
-  // Synchronize deletion with Google Sheets
-  callAppsScript('deleteWorkOrder', { woId: upperWoId }).catch(err => {
+  // Synchronize deletion with Google Sheets before responding, otherwise a
+  // dropped background call resurrects the row on the next hydration.
+  try {
+    await callAppsScript('deleteWorkOrder', { woId: upperWoId });
+  } catch (err: any) {
     console.error('GAS deleteWorkOrder sync notice:', err.message);
-  });
+  }
 
   // Log activity
-  activityLogsDb.unshift({
+  recordActivity({
     id: `act_${Date.now()}`,
-    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    type: 'wo_created',
+    timestamp: new Date().toISOString(),
+    type: 'wo_deleted',
+    subId: user.id,
     subName: user.name,
     company: user.company,
     projectName: wo.projectName || upperWoId,
@@ -2362,22 +2598,30 @@ app.delete('/api/work-orders/:woId', (req, res) => {
   res.json({ success: true, message: `Work Order ${upperWoId} deleted.` });
 });
 
-// 10. Photo Upload & Line-Item Verification (Basic Direct Field Verification)
+// 10. Photo Intake & Line-Item Evidence (no automated image analysis yet)
 app.post('/api/verify-photo', async (req, res) => {
   try {
     const user = getUserFromRequest(req);
     if (!user) {
       return res.status(401).json({ success: false, error: 'Authentication required. Please sign in.' });
     }
+    if (rejectPreviewWrite(req, res, 'uploading field photos')) return;
 
     const { lineId, woId, base64Image, mimeType, taskDescription } = req.body;
-    if (!lineId || !base64Image || !taskDescription) {
+    if (!lineId || !base64Image || !taskDescription || typeof lineId !== 'string') {
       return res.status(400).json({ success: false, error: 'lineId, base64Image, and taskDescription are required' });
     }
 
-    const targetWoId = (woId || lineId.split('-L')[0]).toUpperCase();
+    const targetWoId = String(woId || lineId.split('-L')[0]).toUpperCase();
     const wo = workOrdersDb[targetWoId];
-    if (wo && !canUserAccessWorkOrder(user, targetWoId, wo)) {
+    if (!wo) {
+      return res.status(404).json({
+        success: false,
+        error: `Work Order ${targetWoId} was not found. Photos can only be submitted against an existing work order.`
+      });
+    }
+
+    if (!canUserAccessWorkOrder(user, targetWoId, wo)) {
       return res.status(403).json({
         success: false,
         error: `Access Denied: You are not authorized to submit inspection photos for Work Order ${targetWoId}.`
@@ -2389,75 +2633,95 @@ app.post('/api/verify-photo', async (req, res) => {
       : base64Image;
 
     const photoUrl = base64Image.startsWith('data:') ? base64Image : `data:${mimeType || 'image/jpeg'};base64,${cleanBase64}`;
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const nowIso = new Date().toISOString();
 
-    // Update in-memory DB
-    const items = lineItemsDb[targetWoId];
-    if (items) {
-      const item = items.find(i => i.lineId === lineId);
-      if (item) {
-        item.status = 'Completed';
-        item.photoUrl = photoUrl;
-        item.timestamp = nowTime;
-      }
-
-      // Update work order progress
-      const targetWo = workOrdersDb[targetWoId];
-      if (targetWo) {
-        const completed = items.filter(i => i.status === 'Completed').length;
-        targetWo.completedItems = completed;
-        targetWo.status = (completed === items.length && items.length > 0)
-          ? 'Completed'
-          : (completed > 0 ? 'In Progress' : 'Open');
-      }
-      saveDatabaseState();
-
-      // Log real-time inspection event for PM
-      activityLogsDb.unshift({
-        id: `act_${Date.now()}`,
-        timestamp: nowTime,
-        type: 'photo_uploaded',
-        subId: user.id,
-        subName: user.name,
-        company: user.company,
-        woId: targetWoId,
-        projectName: targetWo?.projectName || targetWoId,
-        lineId,
-        taskDescription,
-        verdict: 'PASS',
-        photoUrl
+    const items = lineItemsDb[targetWoId] || [];
+    const item = items.find(i => i.lineId === lineId);
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        error: `Line item ${lineId} is not part of Work Order ${targetWoId}.`
       });
-
-      // Synchronize inspection photo to Google Drive & update LineItems sheet in background
-      callAppsScript('verifyPhoto', {
-        lineId,
-        taskDescription,
-        base64Image: cleanBase64,
-        mimeType: mimeType || 'image/jpeg',
-        subcontractorName: user.name
-      }).then(driveRes => {
-        if (driveRes && driveRes.success && driveRes.photoUrl) {
-          const targetItems = lineItemsDb[targetWoId];
-          const targetItem = targetItems ? targetItems.find(i => i.lineId === lineId) : null;
-          if (targetItem) {
-            targetItem.photoUrl = driveRes.photoUrl;
-          }
-        }
-      }).catch(driveErr => console.error('Google Drive photo upload sync notice:', driveErr.message));
     }
 
+    // A re-shoot replaces the evidence but never erases the rejection: the earlier
+    // round stays in the activity log, and the new photo starts a fresh review.
+    const replacedFlaggedPhoto = item.status === 'Flagged';
+    const previousRejection = replacedFlaggedPhoto ? (item.reviewNote || item.verification || '') : '';
+    item.status = 'Completed';
+    item.photoUrl = photoUrl;
+    item.timestamp = nowIso;
+    item.verification = 'Pending Review';
+    item.reviewedBy = '';
+    item.reviewedAt = '';
+    item.reviewNote = '';
+
+    // Photo intake only tracks field progress. A work order becomes "Completed"
+    // through the crew's electronic sign-off, never through the last photo upload.
+    const completed = items.filter(i => i.status === 'Completed').length;
+    wo.completedItems = completed;
+    wo.totalItems = items.length;
+    if (!wo.signedAt) {
+      wo.status = completed > 0 ? 'In Progress' : 'Open';
+    }
+    saveDatabaseState();
+
+    // Log real-time inspection event for PM. No verdict is recorded: this build
+    // performs no automated image analysis, so a human must review the photo.
+    recordActivity({
+      id: `act_${Date.now()}`,
+      timestamp: nowIso,
+      type: replacedFlaggedPhoto ? 'photo_resubmitted' : 'photo_uploaded',
+      subId: user.id,
+      subName: user.name,
+      company: user.company,
+      woId: targetWoId,
+      projectName: wo.projectName || targetWoId,
+      lineId,
+      taskDescription,
+      verdict: '',
+      reviewStatus: 'Pending Review',
+      notes: replacedFlaggedPhoto
+        ? `Replacement photo after a retake request${previousRejection ? `: "${previousRejection}"` : ''}`
+        : (user.role === 'pm' ? `Uploaded by PM ${user.name}` : ''),
+      photoUrl
+    });
+
+    // Synchronize inspection photo to Google Drive & update LineItems sheet in background
+    callAppsScript('verifyPhoto', {
+      lineId,
+      taskDescription,
+      base64Image: cleanBase64,
+      mimeType: mimeType || 'image/jpeg',
+      subcontractorName: user.name,
+      verification: item.verification,
+      reviewNote: replacedFlaggedPhoto
+        ? `Replacement photo for ${user.name} - awaiting PM review`
+        : 'Photo received - awaiting PM review'
+    }).then(driveRes => {
+      if (driveRes && driveRes.success && driveRes.photoUrl) {
+        const targetItem = (lineItemsDb[targetWoId] || []).find(i => i.lineId === lineId);
+        if (targetItem) {
+          targetItem.photoUrl = driveRes.photoUrl;
+        }
+      }
+    }).catch(driveErr => console.error('Google Drive photo upload sync notice:', driveErr.message));
+
     const updatedWo = workOrdersDb[targetWoId];
-    const completedCount = updatedWo ? updatedWo.completedItems : 1;
-    const totalCount = updatedWo ? updatedWo.totalItems : 1;
+    const completedCount = updatedWo ? updatedWo.completedItems : completed;
+    const totalCount = updatedWo ? updatedWo.totalItems : items.length;
 
     res.json({
       success: true,
       lineId,
-      status: 'Completed',
+      status: item.status,
+      verification: item.verification,
+      reviewNote: item.reviewNote,
       photoUrl,
       completedCount,
       totalCount,
-      isComplete: completedCount === totalCount
+      isComplete: totalCount > 0 && completedCount === totalCount,
+      workOrderStatus: updatedWo ? updatedWo.status : wo.status
     });
   } catch (err: any) {
     console.error('Photo upload error:', err);
@@ -2471,6 +2735,7 @@ app.post('/api/work-orders/:woId/sign-off', (req, res) => {
   if (!user) {
     return res.status(401).json({ success: false, error: 'Authentication required. Please sign in.' });
   }
+  if (rejectPreviewWrite(req, res, 'signing off work orders')) return;
 
   const { woId } = req.params;
   const { signatureName } = req.body || {};
@@ -2488,40 +2753,61 @@ app.post('/api/work-orders/:woId/sign-off', (req, res) => {
   }
 
   const items = lineItemsDb[wo.woId] || [];
+  if (items.length === 0) {
+    return res.status(400).json({
+      success: false,
+      error: `Cannot sign off ${upperWoId}. This work order has no line items to certify.`
+    });
+  }
+
+  if (wo.signedAt) {
+    return res.status(409).json({
+      success: false,
+      error: `Work Order ${upperWoId} was already signed off by ${wo.signedBy || 'the assigned crew'} on ${formatStamp(wo.signedAt)}.`
+    });
+  }
+
   const incomplete = items.filter(i => i.status !== 'Completed');
   if (incomplete.length > 0) {
     return res.status(400).json({
       success: false,
-      error: `Cannot sign off. ${incomplete.length} item(s) are not verified yet.`
+      error: `Cannot sign off. ${incomplete.length} item(s) still need a photo.`
     });
   }
 
+  // A Project Manager may complete a job on the crew's behalf (for example on a
+  // shared site tablet), but the record always names who actually signed and who
+  // operated the account, otherwise sign-off can never be audited.
+  const typedSignature = (signatureName && typeof signatureName === 'string' && signatureName.trim())
+    ? signatureName.trim()
+    : '';
+  const actingForCrew = user.role === 'pm';
   wo.status = 'Completed';
-  wo.signedBy = (signatureName && typeof signatureName === 'string' && signatureName.trim()) 
-    ? signatureName.trim() 
-    : user.name;
-  wo.signedAt = new Date().toLocaleString();
+  wo.signedBy = typedSignature || (actingForCrew ? (wo.subName || user.name) : user.name);
+  wo.signedAt = new Date().toISOString();
   saveDatabaseState();
 
   // Log sign-off event in real-time activity stream
-  const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  activityLogsDb.unshift({
+  recordActivity({
     id: `act_${Date.now()}`,
-    timestamp: nowTime,
-    type: 'sub_signed_off',
+    timestamp: wo.signedAt,
+    type: actingForCrew ? 'wo_signed_off_by_pm' : 'sub_signed_off',
     subId: user.id,
-    subName: user.name,
+    subName: wo.signedBy,
     company: user.company,
     woId,
     projectName: wo.projectName,
     taskDescription: `All ${items.length} line items completed & officially signed off`,
-    notes: `Electronic sign-off executed by ${wo.signedBy}`
+    notes: actingForCrew
+      ? `Electronic sign-off recorded by PM ${user.name} on behalf of ${wo.subName || 'the assigned crew'}`
+      : `Electronic sign-off executed by ${wo.signedBy}`
   });
 
   // Synchronize sign-off to Google Sheet
   callAppsScript('signOff', {
     woId,
-    signerName: wo.signedBy
+    signerName: wo.signedBy,
+    signedAt: wo.signedAt
   }).catch(e => console.error('Sheet sign-off sync notice:', e.message));
 
   res.json({
@@ -2529,6 +2815,137 @@ app.post('/api/work-orders/:woId/sign-off', (req, res) => {
     message: `Work Order ${woId} successfully signed off and completed.`,
     workOrder: wo
   });
+});
+
+// 11b. Project Manager photo review: approve the evidence or send it back
+app.post('/api/work-orders/:woId/line-items/:lineId/review', async (req, res) => {
+  try {
+    const user = getUserFromRequest(req);
+    if (!user) {
+      return res.status(401).json({ success: false, error: 'Authentication required. Please sign in.' });
+    }
+    if (user.role !== 'pm') {
+      return res.status(403).json({ success: false, error: 'Project manager access is required to review submitted photos.' });
+    }
+
+    const woId = String(req.params.woId || '').trim().toUpperCase();
+    const lineId = String(req.params.lineId || '').trim();
+    const wo = workOrdersDb[woId];
+    if (!wo) {
+      return res.status(404).json({ success: false, error: `Work Order ${woId} was not found.` });
+    }
+
+    const items = lineItemsDb[woId] || [];
+    const item = items.find(i => i.lineId === lineId);
+    if (!item) {
+      return res.status(404).json({ success: false, error: `Line item ${lineId} is not part of Work Order ${woId}.` });
+    }
+    if (!item.photoUrl) {
+      return res.status(400).json({ success: false, error: `Line item ${lineId} has no photo to review yet.` });
+    }
+
+    const decision = String(req.body?.decision || '').trim().toLowerCase();
+    const note = String(req.body?.note || '').trim().slice(0, 400);
+    if (decision !== 'approve' && decision !== 'reject') {
+      return res.status(400).json({ success: false, error: 'decision must be either "approve" or "reject".' });
+    }
+    if (decision === 'reject' && !note) {
+      return res.status(400).json({
+        success: false,
+        error: 'A note is required when requesting a retake so the crew knows what to fix.'
+      });
+    }
+
+    const reviewedAt = new Date().toISOString();
+    let reopened = false;
+
+    if (decision === 'approve') {
+      item.status = 'Completed';
+      item.verification = 'Approved';
+      item.reviewNote = note;
+    } else {
+      item.status = 'Flagged';
+      item.verification = note;
+      item.reviewNote = note;
+      // A rejected photo invalidates the certification, otherwise the work order
+      // would stay signed off while a line item is openly disputed.
+      if (String(wo.signedAt || '').trim()) {
+        wo.signedAt = undefined;
+        wo.signedBy = undefined;
+        reopened = true;
+      }
+    }
+    item.reviewedBy = user.name;
+    item.reviewedAt = reviewedAt;
+
+    normalizeWorkOrderState();
+    saveDatabaseState();
+
+    recordActivity({
+      id: `act_${Date.now()}`,
+      timestamp: reviewedAt,
+      type: 'line_item_reviewed',
+      subId: wo.assignedSubId || '',
+      subName: wo.subName || 'Assigned crew',
+      company: user.company,
+      woId,
+      projectName: wo.projectName,
+      lineId,
+      taskDescription: item.taskDescription,
+      verdict: decision === 'approve' ? 'PASS' : 'RETAKE_NEEDED',
+      reviewStatus: decision === 'approve' ? 'Approved' : 'Rejected',
+      reviewedBy: user.name,
+      notes: decision === 'approve'
+        ? (note || `Photo accepted by ${user.name}`)
+        : `Retake requested by ${user.name}: ${note}`,
+      photoUrl: item.photoUrl
+    });
+
+    if (reopened) {
+      recordActivity({
+        id: `act_${Date.now()}_reopen`,
+        timestamp: reviewedAt,
+        type: 'wo_reopened',
+        subId: wo.assignedSubId || '',
+        subName: wo.subName || 'Assigned crew',
+        company: user.company,
+        woId,
+        projectName: wo.projectName,
+        lineId,
+        taskDescription: `Sign-off withdrawn - ${wo.signedBy || 'the crew'} must complete line item ${lineId} again`,
+        reviewedBy: user.name,
+        notes: `Work Order ${woId} returned to the crew by PM ${user.name} after a disputed photo`
+      });
+    }
+
+    callAppsScript('updateLineItemStatus', {
+      lineId,
+      status: item.status,
+      verification: item.verification,
+      notes: item.reviewNote,
+      reopen: reopened
+    }).catch(e => console.error('Sheet review sync notice:', e.message));
+
+    res.json({
+      success: true,
+      woId,
+      lineId,
+      status: item.status,
+      verification: item.verification,
+      reviewNote: item.reviewNote,
+      reviewedBy: item.reviewedBy,
+      reviewedAt: item.reviewedAt,
+      reopened,
+      totalItems: wo.totalItems,
+      completedItems: wo.completedItems,
+      workOrderStatus: wo.status,
+      workOrder: wo,
+      lineItems: items
+    });
+  } catch (err: any) {
+    console.error('Line item review error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // 12. Google Apps Script Cloud Sync Status and Config
